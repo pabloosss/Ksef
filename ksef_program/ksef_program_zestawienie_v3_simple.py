@@ -1,381 +1,821 @@
 import os
 import re
-import sys
-import math
+import traceback
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Tuple
-
-try:
-    from PIL import Image, ImageTk
-except Exception:
-    Image = None
-    ImageTk = None
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from playwright.sync_api import sync_playwright
 
-TARGET_COLUMNS = [
-    "Identyfikator sprzedawcy",
-    "Nazwa sprzedawcy",
-    "Nr KSeF",
-    "Nr faktury",
-    "Data wystawienia",
-    "Data zapisania w KSeF",
-    "Data otrzymania",
-    "Waluta",
-    "Netto",
-    "Brutto",
-    "VAT (PLN)",
-]
-
-HEADER_ALIASES = {
-    "Identyfikator sprzedawcy": ["identyfikator sprzedawcy", "nip sprzedawcy", "nip", "sprzedawca nip"],
-    "Nazwa sprzedawcy": ["nazwa sprzedawcy", "sprzedawca", "nazwa podmiotu", "nazwa"],
-    "Nr KSeF": ["nr ksef", "numer ksef", "ksef", "numer referencyjny ksef"],
-    "Nr faktury": ["nr faktury", "numer faktury", "faktura"],
-    "Data wystawienia": ["data wystawienia", "wystawiono"],
-    "Data zapisania w KSeF": ["data zapisania w ksef", "data przyjęcia w ksef", "zapisano w ksef"],
-    "Data otrzymania": ["data otrzymania", "otrzymano"],
-    "Waluta": ["waluta"],
-    "Netto": ["netto", "wartość netto", "kwota netto"],
-    "Brutto": ["brutto", "wartość brutto", "kwota brutto"],
-    "VAT (PLN)": ["vat (pln)", "vat pln", "vat", "kwota vat pln"],
-}
-
 
 class KsefSimpleSummaryApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root):
         self.root = root
         self.root.title("KSeF Program do Arkuszy")
-        self.root.geometry("980x700")
-        self.root.minsize(900, 640)
-        self.root.configure(bg="#f5f7fb")
+        self.root.geometry("1180x760")
+        self.root.minsize(1100, 720)
+        self.root.configure(bg="#eef2f7")
 
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
 
-        self.base_dir = str(Path(__file__).resolve().parent)
+        self.logo_image = None
+        self.spinner_frames = ["●○○", "○●○", "○○●", "○●○"]
+        self.spinner_index = 0
+        self.is_busy = False
+
+        self.base_dir = os.getcwd()
         self.output_dir = os.path.join(self.base_dir, "zestawienia_ksef")
         os.makedirs(self.output_dir, exist_ok=True)
 
-        today = datetime.today()
-        month_start = today.replace(day=1)
+        self.pages_var = tk.StringVar(value="0")
+        self.rows_var = tk.StringVar(value="0")
+        self.file_var = tk.StringVar(value="Brak")
+        self.status_var = tk.StringVar(value="Gotowe do pracy")
+        self.spinner_var = tk.StringVar(value="○○○")
 
-        self.date_from_var = tk.StringVar(value=month_start.strftime("%Y-%m-%d"))
-        self.date_to_var = tk.StringVar(value=today.strftime("%Y-%m-%d"))
-        self.status_var = tk.StringVar(value="Otwórz KSeF")
-        self.summary_var = tk.StringVar(value="Brak zapisanych danych")
-        self.file_var = tk.StringVar(value="-")
+        self.status_box = None
+        self.progress = None
 
-        self.last_headers: List[str] = []
-        self.last_rows: List[Dict] = []
-        self.last_pages: int = 0
-        self.logo_image = None
-        self.busy_running = False
-        self.dot_phase = 0
-        self.dot_colors_idle = ["#cbd5e1", "#94a3b8", "#64748b", "#94a3b8"]
-        self.dot_colors_ready = ["#22c55e", "#4ade80", "#86efac", "#4ade80"]
-        self.dot_colors_busy = ["#f97316", "#fb923c", "#fdba74", "#fb923c"]
-
-        self.setup_style()
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-
-    def setup_style(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-
-        style.configure(
-            "Main.TButton",
-            font=("Segoe UI", 11, "bold"),
-            padding=(16, 11),
-            foreground="#ffffff",
-            background="#c81f25",
-            borderwidth=0,
-        )
-        style.map(
-            "Main.TButton",
-            background=[("active", "#a9151b"), ("pressed", "#8f1217")],
-            foreground=[("disabled", "#f3f4f6")],
-        )
-
-        style.configure(
-            "Ghost.TButton",
-            font=("Segoe UI", 10, "bold"),
-            padding=(14, 10),
-            foreground="#0f172a",
-            background="#ffffff",
-            borderwidth=1,
-            relief="solid",
-        )
-        style.map(
-            "Ghost.TButton",
-            background=[("active", "#eef2f7"), ("pressed", "#e2e8f0")],
-        )
-
-        style.configure(
-            "Red.Horizontal.TProgressbar",
-            troughcolor="#e2e8f0",
-            background="#c81f25",
-            bordercolor="#e2e8f0",
-            lightcolor="#c81f25",
-            darkcolor="#c81f25",
-            thickness=10,
-        )
-
-    def find_logo_file(self) -> str:
-        graphics_dir = Path(self.base_dir) / "Grafiki"
-        if not graphics_dir.exists():
-            return ""
-
-        preferred_names = [
-            "logo.png", "logo.gif", "logo.jpg", "logo.jpeg", "logo.webp",
-            "Logo.png", "Logo.gif", "Logo.jpg", "Logo.jpeg", "Logo.webp",
-        ]
-        for name in preferred_names:
-            candidate = graphics_dir / name
-            if candidate.exists():
-                return str(candidate)
-
-        for ext in ("*.png", "*.gif", "*.jpg", "*.jpeg", "*.webp"):
-            matches = sorted(graphics_dir.glob(ext))
-            if matches:
-                return str(matches[0])
-
-        return ""
-
-
-    def load_logo(self):
-        logo_path = self.find_logo_file()
-        if not logo_path:
-            return None
-
-        max_w, max_h = 280, 78
-
-        try:
-            if Image is not None and ImageTk is not None:
-                img = Image.open(logo_path)
-                img.thumbnail((max_w, max_h))
-                return ImageTk.PhotoImage(img)
-
-            suffix = Path(logo_path).suffix.lower()
-            if suffix in {".png", ".gif"}:
-                img = tk.PhotoImage(file=logo_path)
-                width = max(1, img.width())
-                height = max(1, img.height())
-                scale_w = math.ceil(width / max_w)
-                scale_h = math.ceil(height / max_h)
-                scale = max(1, scale_w, scale_h)
-                if scale > 1:
-                    img = img.subsample(scale, scale)
-                return img
-        except Exception:
-            return None
-
-        return None
-
-
     def build_ui(self):
-        outer = tk.Frame(self.root, bg="#eef2f7", padx=18, pady=18)
-        outer.pack(fill="both", expand=True)
+        main = tk.Frame(self.root, bg="#eef2f7")
+        main.pack(fill="both", expand=True, padx=18, pady=18)
 
-        header = tk.Frame(outer, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1)
-        header.pack(fill="x", pady=(0, 14))
+        header = tk.Frame(main, bg="#ffffff", bd=1, relief="solid")
+        header.pack(fill="x")
 
         accent = tk.Frame(header, bg="#c81f25", height=5)
-        accent.pack(fill="x", side="top")
+        accent.pack(fill="x")
+        accent.pack_propagate(False)
 
-        header_inner = tk.Frame(header, bg="#ffffff", padx=22, pady=18)
-        header_inner.pack(fill="x")
+        header_inner = tk.Frame(header, bg="#ffffff")
+        header_inner.pack(fill="x", padx=18, pady=16)
 
-        left_header = tk.Frame(header_inner, bg="#ffffff")
-        left_header.pack(side="left", fill="both", expand=True)
+        left_head = tk.Frame(header_inner, bg="#ffffff")
+        left_head.pack(side="left", fill="y")
+
+        self._load_logo(left_head)
+
+        title_wrap = tk.Frame(left_head, bg="#ffffff")
+        title_wrap.pack(side="left", padx=(14, 0))
 
         tk.Label(
-            left_header,
+            title_wrap,
             text="KSeF Program do Arkuszy",
-            font=("Segoe UI", 22, "bold"),
             bg="#ffffff",
             fg="#0f172a",
+            font=("Segoe UI", 23, "bold"),
         ).pack(anchor="w")
 
         tk.Label(
-            left_header,
+            title_wrap,
             text="by Paweł Ruchlicki",
-            font=("Segoe UI", 10),
             bg="#ffffff",
             fg="#64748b",
+            font=("Segoe UI", 10, "bold"),
         ).pack(anchor="w", pady=(6, 0))
 
-        self.logo_image = self.load_logo()
-        if self.logo_image is not None:
-            logo_wrap = tk.Frame(header_inner, bg="#ffffff")
-            logo_wrap.pack(side="right", anchor="ne", padx=(18, 0))
+        right_head = tk.Frame(header_inner, bg="#ffffff")
+        right_head.pack(side="right", anchor="e")
 
-            logo_box = tk.Frame(logo_wrap, bg="#ffffff", bd=0, highlightbackground="#e2e8f0", highlightthickness=1, padx=14, pady=10)
-            logo_box.pack(anchor="e")
+        status_pill = tk.Frame(right_head, bg="#f8fafc", bd=1, relief="solid")
+        status_pill.pack(anchor="e")
 
-            tk.Label(logo_box, image=self.logo_image, bg="#ffffff").pack(anchor="e")
+        tk.Label(
+            status_pill,
+            textvariable=self.spinner_var,
+            bg="#f8fafc",
+            fg="#c81f25",
+            font=("Segoe UI", 11, "bold"),
+            padx=10,
+            pady=7,
+        ).pack(side="left")
 
-        controls = tk.Frame(outer, bg="#eef2f7")
-        controls.pack(fill="x", pady=(0, 14))
+        tk.Label(
+            status_pill,
+            textvariable=self.status_var,
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 10, "bold"),
+            padx=2,
+            pady=7,
+        ).pack(side="left")
 
-        left_panel = tk.Frame(controls, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=18, pady=16)
-        left_panel.pack(side="left", fill="x", expand=True)
+        content = tk.Frame(main, bg="#eef2f7")
+        content.pack(fill="both", expand=True, pady=(14, 0))
 
-        tk.Label(left_panel, text="Zakres do nazwy pliku", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        left = tk.Frame(content, bg="#ffffff", bd=1, relief="solid", padx=16, pady=16)
+        left.pack(side="left", fill="y", padx=(0, 12))
+        left.configure(width=355)
+        left.pack_propagate(False)
 
-        tk.Label(left_panel, text="Data od", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#0f172a").grid(row=1, column=0, sticky="w")
-        date_from_entry = tk.Entry(left_panel, textvariable=self.date_from_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16)
-        date_from_entry.grid(row=2, column=0, sticky="w", padx=(0, 14), ipady=6, pady=(4, 0))
+        right = tk.Frame(content, bg="#ffffff", bd=1, relief="solid", padx=16, pady=16)
+        right.pack(side="left", fill="both", expand=True)
 
-        tk.Label(left_panel, text="Data do", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#0f172a").grid(row=1, column=1, sticky="w")
-        date_to_entry = tk.Entry(left_panel, textvariable=self.date_to_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16)
-        date_to_entry.grid(row=2, column=1, sticky="w", ipady=6, pady=(4, 0))
+        tk.Label(left, text="Sterowanie", font=("Segoe UI", 16, "bold"), bg="#ffffff", fg="#0f172a").pack(anchor="w")
 
-        buttons_panel = tk.Frame(controls, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=18, pady=16)
-        buttons_panel.pack(side="left", padx=(12, 0))
+        btn_wrap = tk.Frame(left, bg="#ffffff")
+        btn_wrap.pack(fill="x", pady=(12, 8))
 
-        ttk.Button(buttons_panel, text="Otwórz KSeF", style="Ghost.TButton", command=self.start_browser).pack(fill="x")
-        ttk.Button(buttons_panel, text="Pobierz zestawienie", style="Main.TButton", command=self.run_full_export).pack(fill="x", pady=10)
-        ttk.Button(buttons_panel, text="Otwórz folder", style="Ghost.TButton", command=self.open_output_folder).pack(fill="x")
+        self.make_btn(btn_wrap, "Otwórz KSeF", self.open_ksef, primary=True).pack(fill="x", pady=(0, 10))
+        self.make_btn(btn_wrap, "Pobierz zestawienie do Excel", self.export_summary, primary=False).pack(fill="x", pady=(0, 10))
+        self.make_btn(btn_wrap, "Otwórz folder z plikami", self.open_output_folder, primary=False).pack(fill="x")
 
-        status_row = tk.Frame(outer, bg="#eef2f7")
-        status_row.pack(fill="x", pady=(0, 14))
+        note_card = tk.Frame(left, bg="#f8fafc", bd=1, relief="solid")
+        note_card.pack(fill="x", pady=(14, 14))
 
-        self.status_card = tk.Frame(status_row, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=16, pady=14)
-        self.status_card.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            note_card,
+            text="Jak używać",
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 11, "bold"),
+            padx=12,
+            pady=10,
+        ).pack(anchor="w")
 
-        self.result_card = tk.Frame(status_row, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=16, pady=14)
-        self.result_card.pack(side="left", fill="x", expand=True, padx=12)
-
-        self.file_card = tk.Frame(status_row, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=16, pady=14)
-        self.file_card.pack(side="left", fill="x", expand=True)
-
-        tk.Label(self.status_card, text="Status", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").pack(anchor="w")
-        status_line = tk.Frame(self.status_card, bg="#ffffff")
-        status_line.pack(anchor="w", fill="x", pady=(10, 0))
-
-        self.status_dot_canvas = tk.Canvas(status_line, width=14, height=14, bg="#ffffff", highlightthickness=0, bd=0)
-        self.status_dot_canvas.pack(side="left")
-        self.status_dot_item = self.status_dot_canvas.create_oval(2, 2, 12, 12, fill="#94a3b8", outline="")
-
-        self.status_label = tk.Label(status_line, textvariable=self.status_var, font=("Segoe UI", 12, "bold"), bg="#ffffff", fg="#0f172a")
-        self.status_label.pack(side="left", padx=(8, 0))
-
-        tk.Label(self.result_card, text="Wynik", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").pack(anchor="w")
-        tk.Label(self.result_card, textvariable=self.summary_var, font=("Segoe UI", 12), bg="#ffffff", fg="#0f172a", wraplength=250, justify="left").pack(anchor="w", pady=(10, 0))
-
-        tk.Label(self.file_card, text="Plik", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").pack(anchor="w")
-        tk.Label(self.file_card, textvariable=self.file_var, font=("Segoe UI", 12), bg="#ffffff", fg="#0f172a", wraplength=250, justify="left").pack(anchor="w", pady=(10, 0))
-
-        progress_wrap = tk.Frame(outer, bg="#eef2f7")
-        progress_wrap.pack(fill="x", pady=(0, 14))
-
-        self.progress = ttk.Progressbar(progress_wrap, mode="determinate", maximum=100, style="Red.Horizontal.TProgressbar")
-        self.progress.pack(fill="x")
-
-        log_card = tk.Frame(outer, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1)
-        log_card.pack(fill="both", expand=True)
-
-        log_header = tk.Frame(log_card, bg="#ffffff")
-        log_header.pack(fill="x", padx=16, pady=(14, 8))
-
-        tk.Label(log_header, text="Log", font=("Segoe UI", 14, "bold"), bg="#ffffff", fg="#0f172a").pack(side="left")
-
-        self.log_box = tk.Text(
-            log_card,
-            font=("Consolas", 10),
-            bg="#081229",
-            fg="#e2e8f0",
-            insertbackground="#ffffff",
-            wrap="word",
-            bd=0,
-            relief="flat",
-            padx=14,
-            pady=14,
-            height=18,
+        note_text = (
+            "1. Otwórz KSeF\n"
+            "2. Zaloguj się ręcznie\n"
+            "3. Ustaw filtry ręcznie w KSeF\n"
+            "4. Otwórz listę faktur zakupu\n"
+            "5. Kliknij „Pobierz zestawienie do Excel”"
         )
-        self.log_box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        tk.Label(
+            note_card,
+            text=note_text,
+            justify="left",
+            bg="#f8fafc",
+            fg="#475569",
+            font=("Segoe UI", 10),
+            padx=12,
+        ).pack(anchor="w", pady=(0, 12))
 
-        self.log("[INFO] Aplikacja uruchomiona.")
-        self.log("[INFO] Ustaw filtry ręcznie w KSeF, a potem kliknij pobierz zestawienie.")
-        self.animate_status_dot()
+        stats_wrap = tk.Frame(left, bg="#ffffff")
+        stats_wrap.pack(fill="x", pady=(0, 14))
 
-    def log(self, text: str):
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", text + "\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
-        self.root.update_idletasks()
+        self.make_stat(stats_wrap, "Strony", self.pages_var).pack(fill="x", pady=(0, 8))
+        self.make_stat(stats_wrap, "Wiersze", self.rows_var).pack(fill="x", pady=(0, 8))
+        self.make_stat(stats_wrap, "Plik", self.file_var, small=True).pack(fill="x")
 
-    def set_status(self, text: str):
-        self.status_var.set(text)
-        self.root.update_idletasks()
+        tk.Label(right, text="Log operacji", font=("Segoe UI", 16, "bold"), bg="#ffffff", fg="#0f172a").pack(anchor="w")
 
-    def update_progress(self, current: int, total: int, text: str):
-        total = max(1, total)
-        current = max(0, min(current, total))
-        self.busy_running = False
-        self.progress.stop()
-        self.progress.configure(mode="determinate", maximum=total)
-        self.progress["value"] = current
-        percent = int(current / total * 100)
-        self.set_status(f"{text} ({percent}%)")
+        self.progress = ttk.Progressbar(right, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=(12, 12))
 
-    def reset_progress(self, text: str):
-        self.busy_running = False
-        self.progress.stop()
-        self.progress.configure(mode="determinate", maximum=100)
+        log_frame = tk.Frame(right, bg="#0b1220")
+        log_frame.pack(fill="both", expand=True)
+
+        self.status_box = tk.Text(
+            log_frame,
+            bg="#0b1220",
+            fg="#dbe7f4",
+            insertbackground="#ffffff",
+            relief="flat",
+            bd=0,
+            font=("Consolas", 10),
+            wrap="word",
+            padx=12,
+            pady=12,
+        )
+        self.status_box.pack(fill="both", expand=True)
+
+        self.log("[INFO] Program uruchomiony.")
+        self.log("[INFO] Filtry ustawiasz ręcznie w KSeF.")
+        self.log("[INFO] Program zapisze dokładnie to, co jest aktualnie widoczne na liście.")
         self.progress["value"] = 0
-        self.set_status(text)
 
+    def make_btn(self, parent, text, command, primary=False):
+        bg = "#c81f25" if primary else "#ffffff"
+        fg = "#ffffff" if primary else "#0f172a"
+        active = "#a8181d" if primary else "#f1f5f9"
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground=active,
+            activeforeground=fg,
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 10, "bold"),
+            cursor="hand2",
+            padx=14,
+            pady=12,
+        )
 
-    def start_busy(self, text: str):
-        self.busy_running = True
-        self.progress.stop()
-        self.progress.configure(mode="indeterminate")
-        self.progress.start(12)
-        self.set_status(text)
+    def make_stat(self, parent, label, var, small=False):
+        card = tk.Frame(parent, bg="#f8fafc", bd=1, relief="solid")
+        tk.Label(card, text=label, bg="#f8fafc", fg="#64748b", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        tk.Label(
+            card,
+            textvariable=var,
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 10 if small else 18, "bold"),
+            wraplength=280,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+        return card
 
-    def stop_busy(self, text: str, progress_value: int = 0):
-        self.busy_running = False
-        self.progress.stop()
-        self.progress.configure(mode="determinate", maximum=100)
-        self.progress["value"] = progress_value
-        self.set_status(text)
+    def _load_logo(self, parent):
+        logo_wrap = tk.Frame(parent, bg="#ffffff", width=78, height=78)
+        logo_wrap.pack(side="left")
+        logo_wrap.pack_propagate(False)
 
-    def animate_status_dot(self):
-        if hasattr(self, "status_dot_canvas"):
-            if self.busy_running:
-                palette = self.dot_colors_busy
-            elif self.page is not None:
-                palette = self.dot_colors_ready
-            else:
-                palette = self.dot_colors_idle
+        logo_path = self.find_logo_path()
+        if logo_path:
+            try:
+                self.logo_image = tk.PhotoImage(file=logo_path)
+                tk.Label(logo_wrap, image=self.logo_image, bg="#ffffff").pack(fill="both", expand=True)
+                return
+            except Exception:
+                pass
 
-            color = palette[self.dot_phase % len(palette)]
-            self.status_dot_canvas.itemconfigure(self.status_dot_item, fill=color)
-            self.dot_phase += 1
+        tk.Label(
+            logo_wrap,
+            text="KSeF",
+            bg="#c81f25",
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+        ).pack(fill="both", expand=True)
 
-        self.root.after(180, self.animate_status_dot)
+    def find_logo_path(self):
+        graphics_dir = os.path.join(self.base_dir, "Grafiki")
+        candidates = [
+            os.path.join(graphics_dir, "logo.png"),
+            os.path.join(graphics_dir, "logo.gif"),
+            os.path.join(graphics_dir, "logo.jpg"),
+            os.path.join(graphics_dir, "logo.jpeg"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        if os.path.isdir(graphics_dir):
+            for name in os.listdir(graphics_dir):
+                if name.lower().endswith((".png", ".gif")):
+                    return os.path.join(graphics_dir, name)
+        return None
+
+    def ui_tick(self):
+        self.spinner_index = (self.spinner_index + 1) % len(self.spinner_frames)
+        self.spinner_var.set(self.spinner_frames[self.spinner_index] if self.is_busy else "○○○")
+        self.root.update_idletasks()
+        self.root.update()
+
+    def set_busy(self, value, status=None):
+        self.is_busy = value
+        if status is not None:
+            self.status_var.set(status)
+        self.ui_tick()
+
+    def set_status(self, text):
+        self.status_var.set(text)
+        self.ui_tick()
+
+    def log(self, text):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.status_box.insert("end", f"[{timestamp}] {text}\n")
+        self.status_box.see("end")
+        self.ui_tick()
+
+    def set_progress(self, current, total):
+        total = max(1, total)
+        pct = int((current / total) * 100)
+        self.progress["value"] = pct
+        self.ui_tick()
 
     def open_output_folder(self):
+        os.makedirs(self.output_dir, exist_ok=True)
         try:
-            os.makedirs(self.output_dir, exist_ok=True)
             os.startfile(self.output_dir)
-        except Exception as e:
-            messagebox.showerror("Błąd", f"Nie udało się otworzyć folderu.\n\n{e}")
+        except Exception:
+            subprocess.Popen(["explorer", self.output_dir])
 
-    def close_browser_resources(self):
+    def open_ksef(self):
+        if self.page is not None:
+            messagebox.showinfo("Informacja", "Okno KSeF jest już otwarte.")
+            return
+        try:
+            self.set_busy(True, "Uruchamianie KSeF...")
+            self.log("[INFO] Uruchamiam przeglądarkę...")
+            self.playwright = sync_playwright().start()
+            try:
+                self.browser = self.playwright.chromium.launch(channel="msedge", headless=False, slow_mo=70)
+            except Exception:
+                self.browser = self.playwright.chromium.launch(headless=False, slow_mo=70)
+            self.context = self.browser.new_context(accept_downloads=True)
+            self.page = self.context.new_page()
+            self.page.goto("https://ap.ksef.mf.gov.pl/web/invoice-list", timeout=90000)
+            self.set_busy(False, "KSeF otwarty")
+            self.log("[OK] KSeF został otwarty.")
+            self.log("[INFO] Zaloguj się ręcznie, ustaw filtry ręcznie i przejdź na listę faktur.")
+            messagebox.showinfo(
+                "KSeF",
+                "KSeF został otwarty.\n\n"
+                "1. Zaloguj się ręcznie\n"
+                "2. Ustaw filtry ręcznie\n"
+                "3. Otwórz listę faktur zakupu\n"
+                "4. Kliknij „Pobierz zestawienie do Excel”",
+            )
+        except Exception as e:
+            self.set_busy(False, "Błąd")
+            self.log(f"[BŁĄD] Nie udało się otworzyć KSeF: {e}")
+            messagebox.showerror("Błąd", f"Nie udało się otworzyć KSeF.\n\n{e}")
+
+    @staticmethod
+    def normalize(text):
+        return re.sub(r"\s+", " ", (text or "")).strip()
+
+    @staticmethod
+    def is_money_cell(text):
+        return bool(re.fullmatch(r"[-+]?\d[\d\s\.]*,\d{2}\s+[A-Z]{3}", text or ""))
+
+    @staticmethod
+    def clean_invoice_number(text):
+        text = text or ""
+        text = re.sub(r"\s*Kopiuj numer faktury.*$", "", text, flags=re.I)
+        text = re.sub(r"\s*content_copy.*$", "", text, flags=re.I)
+        return text.strip()
+
+    @staticmethod
+    def clean_date(text):
+        m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", text or "")
+        if m:
+            d, mth, y = m.groups()
+            return f"{y}-{mth}-{d}"
+        return ""
+
+    @staticmethod
+    def parse_money(text):
+        m = re.search(r"([-+]?\d[\d\s\.]*,\d{2})\s+([A-Z]{3})", text or "")
+        if not m:
+            return "", None
+        amount_txt, currency = m.groups()
+        amount = float(amount_txt.replace(" ", "").replace(".", "").replace(",", "."))
+        return currency, amount
+
+    @staticmethod
+    def extract_nr_ksef(text):
+        m = re.search(r"\b\d{10}-\d{8}-[A-Z0-9]+-[A-Z0-9]+\b", text or "", flags=re.I)
+        return m.group(0) if m else ""
+
+    def get_rows_on_page(self):
+        selectors = ["table tbody tr", "tbody tr", "[role='row']"]
+        rows = None
+        for sel in selectors:
+            try:
+                loc = self.page.locator(sel)
+                if loc.count() > 0:
+                    rows = loc
+                    break
+            except Exception:
+                continue
+
+        parsed = []
+        if rows is None:
+            return parsed
+
+        count = rows.count()
+        for i in range(count):
+            try:
+                row = rows.nth(i)
+                if not row.is_visible():
+                    continue
+
+                cell_loc = row.locator("td, [role='cell']")
+                if cell_loc.count() == 0:
+                    continue
+
+                cells = []
+                for c in range(cell_loc.count()):
+                    try:
+                        txt = self.normalize(cell_loc.nth(c).inner_text())
+                    except Exception:
+                        txt = ""
+                    if txt:
+                        cells.append(txt)
+
+                if not cells:
+                    continue
+
+                item = self.parse_row_cells(cells)
+                if item:
+                    parsed.append(item)
+            except Exception:
+                continue
+
+        return parsed
+
+    def parse_row_cells(self, cells):
+        filtered = []
+        for txt in cells:
+            t = self.normalize(txt)
+            if not t:
+                continue
+            if "zaznacz tylko ten wiersz" in t.lower():
+                continue
+            if t.lower() in {"wybierz", "akcje"}:
+                continue
+            filtered.append(t)
+
+        if len(filtered) < 6:
+            return None
+
+        identifier = ""
+        seller_name = ""
+        nr_ksef = ""
+        nr_faktury = ""
+        dates = []
+        amount_cells = []
+
+        for t in filtered:
+            if not identifier and re.fullmatch(r"\d{10}", t):
+                identifier = t
+                continue
+
+            if not nr_ksef:
+                maybe = self.extract_nr_ksef(t)
+                if maybe:
+                    nr_ksef = maybe
+                    continue
+
+            if self.clean_date(t):
+                dates.append(self.clean_date(t))
+                continue
+
+            if self.is_money_cell(t):
+                amount_cells.append(t)
+                continue
+
+        if identifier:
+            try:
+                idx = filtered.index(identifier)
+                if idx + 1 < len(filtered):
+                    seller_name = filtered[idx + 1]
+            except Exception:
+                pass
+
+        ksef_index = -1
+        for idx, t in enumerate(filtered):
+            if nr_ksef and nr_ksef in t:
+                ksef_index = idx
+                break
+
+        if ksef_index >= 0:
+            for t in filtered[ksef_index + 1:]:
+                if self.clean_date(t):
+                    continue
+                if self.is_money_cell(t):
+                    continue
+                if re.fullmatch(r"\d{10}", t):
+                    continue
+                if self.extract_nr_ksef(t):
+                    continue
+                if t == seller_name:
+                    continue
+                nr_faktury = self.clean_invoice_number(t)
+                if nr_faktury:
+                    break
+
+        if not seller_name:
+            for t in filtered:
+                if t == identifier:
+                    continue
+                if self.extract_nr_ksef(t) or self.is_money_cell(t) or self.clean_date(t):
+                    continue
+                if "przejdź do podglądu faktury" in t.lower():
+                    continue
+                seller_name = t
+                break
+
+        if not nr_ksef and not nr_faktury and not dates:
+            return None
+
+        netto_currency = ""
+        netto = brutto = vat_pln = None
+
+        if len(amount_cells) >= 1:
+            netto_currency, netto = self.parse_money(amount_cells[0])
+        if len(amount_cells) >= 2:
+            _, brutto = self.parse_money(amount_cells[1])
+        if len(amount_cells) >= 3:
+            _, vat_pln = self.parse_money(amount_cells[2])
+
+        return {
+            "Identyfikator sprzedawcy": identifier,
+            "Nazwa sprzedawcy": seller_name,
+            "Nr KSeF": nr_ksef,
+            "Nr faktury": nr_faktury,
+            "Data wystawienia": dates[0] if len(dates) > 0 else "",
+            "Data zapisania w KSeF": dates[1] if len(dates) > 1 else "",
+            "Data otrzymania": dates[2] if len(dates) > 2 else "",
+            "Waluta": netto_currency,
+            "Netto": netto,
+            "Brutto": brutto,
+            "VAT (PLN)": vat_pln,
+            "_signature": f"{identifier}|{nr_ksef}|{nr_faktury}",
+        }
+
+    def page_signature(self, rows):
+        return "|".join(r["_signature"] for r in rows[:5]) if rows else "EMPTY"
+
+    def is_disabled_element(self, locator):
+        try:
+            disabled = (locator.get_attribute("disabled") or "") + (locator.get_attribute("aria-disabled") or "")
+            if "true" in disabled.lower():
+                return True
+            classes = (locator.get_attribute("class") or "").lower()
+            if "disabled" in classes:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def click_locator(self, locator, timeout=3000):
+        try:
+            locator.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            pass
+        for kwargs in ({}, {"force": True}):
+            try:
+                locator.click(timeout=timeout, **kwargs)
+                return True
+            except Exception:
+                pass
+        try:
+            locator.evaluate("el => el.click()")
+            return True
+        except Exception:
+            return False
+
+    def current_numeric_page(self):
+        selectors = [
+            "[aria-current='page']",
+            "button[aria-current='true']",
+            "a[aria-current='true']",
+            ".active",
+            ".selected",
+            ".current",
+        ]
+        for sel in selectors:
+            try:
+                loc = self.page.locator(sel)
+                for i in range(loc.count()):
+                    txt = self.normalize(loc.nth(i).inner_text())
+                    if txt.isdigit():
+                        return int(txt)
+            except Exception:
+                continue
+        return None
+
+    def wait_for_page_change(self, before_signature, before_page=None, timeout_ms=6000):
+        loops = max(1, timeout_ms // 250)
+        for _ in range(loops):
+            self.page.wait_for_timeout(250)
+            rows = self.get_rows_on_page()
+            after_signature = self.page_signature(rows)
+            after_page = self.current_numeric_page()
+            if after_signature and after_signature != before_signature:
+                return True
+            if before_page is not None and after_page is not None and after_page != before_page:
+                return True
+        return False
+
+    def click_page_number(self, target_page):
+        if target_page is None:
+            return False
+        before_signature = self.page_signature(self.get_rows_on_page())
+        before_page = self.current_numeric_page()
+        for sel in ["button", "a", "[role='button']", "li", "span"]:
+            try:
+                loc = self.page.locator(sel)
+                for i in range(loc.count()):
+                    item = loc.nth(i)
+                    txt = self.normalize(item.inner_text())
+                    if txt != str(target_page):
+                        continue
+                    if self.is_disabled_element(item):
+                        continue
+                    if not self.click_locator(item, timeout=2500):
+                        continue
+                    if self.wait_for_page_change(before_signature, before_page, timeout_ms=4500):
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def go_to_first_page(self):
+        prev_selectors = [
+            "button[aria-label*='Poprzed']",
+            "button[title*='Poprzed']",
+            "a[aria-label*='Poprzed']",
+            "a[title*='Poprzed']",
+            "text=Poprzednia",
+            "text=Previous",
+            "button:has-text('<')",
+            "a:has-text('<')",
+            "button:has-text('‹')",
+            "a:has-text('‹')",
+            "[aria-label='Go to previous page']",
+        ]
+        for _ in range(50):
+            moved = False
+            before = self.page_signature(self.get_rows_on_page())
+            before_page = self.current_numeric_page()
+            if before_page is not None and before_page <= 1:
+                break
+            for sel in prev_selectors:
+                try:
+                    loc = self.page.locator(sel)
+                    if loc.count() == 0:
+                        continue
+                    btn = loc.first
+                    if self.is_disabled_element(btn):
+                        continue
+                    if not self.click_locator(btn, timeout=2500):
+                        continue
+                    if self.wait_for_page_change(before, before_page, timeout_ms=3500):
+                        moved = True
+                        break
+                except Exception:
+                    continue
+            if not moved:
+                if before_page and before_page > 1 and self.click_page_number(1):
+                    continue
+                break
+
+    def go_to_next_page(self):
+        before_signature = self.page_signature(self.get_rows_on_page())
+        before_page = self.current_numeric_page()
+
+        if before_page is not None and self.click_page_number(before_page + 1):
+            return True
+
+        next_selectors = [
+            "button[aria-label*='Nast']",
+            "button[title*='Nast']",
+            "a[aria-label*='Nast']",
+            "a[title*='Nast']",
+            "[role='button'][aria-label*='Nast']",
+            "text=Następna",
+            "text=Next",
+            "text=Dalej",
+            "[aria-label='Go to next page']",
+            "button:has-text('>')",
+            "a:has-text('>')",
+            "button:has-text('›')",
+            "a:has-text('›')",
+            "button:has-text('»')",
+            "a:has-text('»')",
+        ]
+        for sel in next_selectors:
+            try:
+                loc = self.page.locator(sel)
+                if loc.count() == 0:
+                    continue
+                for i in range(loc.count()):
+                    btn = loc.nth(i)
+                    if self.is_disabled_element(btn):
+                        continue
+                    if not self.click_locator(btn, timeout=2500):
+                        continue
+                    if self.wait_for_page_change(before_signature, before_page, timeout_ms=4500):
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def scan_all_pages(self):
+        all_rows = []
+        seen_signatures = set()
+        self.go_to_first_page()
+
+        page_no = 0
+        max_pages = 500
+        while page_no < max_pages:
+            page_no += 1
+            self.set_status(f"Skanuję stronę {page_no}...")
+            rows = self.get_rows_on_page()
+            sig = self.page_signature(rows)
+
+            if sig in seen_signatures:
+                self.log(f"[INFO] Wykryto powtórzenie strony przy stronie {page_no}. Kończę skanowanie.")
+                break
+            seen_signatures.add(sig)
+
+            all_rows.extend(rows)
+            self.pages_var.set(str(page_no))
+            self.rows_var.set(str(len(all_rows)))
+            self.log(f"[INFO] Strona {page_no}: odczytano {len(rows)} wierszy.")
+            self.set_progress(page_no, max(page_no + 1, 2))
+
+            if not self.go_to_next_page():
+                self.log(f"[INFO] Nie znaleziono kolejnej strony po stronie {page_no}.")
+                break
+
+        if page_no >= max_pages:
+            self.log("[INFO] Osiągnięto limit bezpieczeństwa 500 stron.")
+
+        return all_rows
+
+    def autosize(self, ws):
+        for col in ws.columns:
+            max_len = 0
+            letter = get_column_letter(col[0].column)
+            for cell in col:
+                val = "" if cell.value is None else str(cell.value)
+                if len(val) > max_len:
+                    max_len = len(val)
+            ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 38)
+
+    def save_excel(self, rows):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self.output_dir, f"KSeF_Arkusz_{timestamp}.xlsx")
+
+        wb = Workbook()
+        ws_info = wb.active
+        ws_info.title = "Info"
+        ws_info.append(["Parametr", "Wartość"])
+        ws_info.append(["Data eksportu", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        ws_info.append(["Liczba stron", self.pages_var.get()])
+        ws_info.append(["Liczba wierszy", len(rows)])
+
+        ws = wb.create_sheet("Invoices")
+        headers = [
+            "Identyfikator sprzedawcy",
+            "Nazwa sprzedawcy",
+            "Nr KSeF",
+            "Nr faktury",
+            "Data wystawienia",
+            "Data zapisania w KSeF",
+            "Data otrzymania",
+            "Waluta",
+            "Netto",
+            "Brutto",
+            "VAT (PLN)",
+        ]
+        ws.append(headers)
+
+        header_fill = PatternFill("solid", fgColor="C81F25")
+        header_font = Font(color="FFFFFF", bold=True)
+
+        for idx, _ in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=idx)
+            cell.fill = header_fill
+            cell.font = header_font
+
+        for row in rows:
+            ws.append([row.get(h, "") for h in headers])
+
+        self.autosize(ws_info)
+        self.autosize(ws)
+        wb.save(path)
+        return path
+
+    def export_summary(self):
+        if self.page is None:
+            messagebox.showwarning("Uwaga", "Najpierw kliknij „Otwórz KSeF”.")
+            return
+
+        try:
+            self.set_busy(True, "Skanowanie listy...")
+            self.progress["value"] = 0
+            self.pages_var.set("0")
+            self.rows_var.set("0")
+            rows = self.scan_all_pages()
+
+            if not rows:
+                self.set_busy(False, "Brak danych")
+                self.log("[BŁĄD] Nie znaleziono żadnych wierszy do eksportu.")
+                messagebox.showwarning("Brak danych", "Nie znaleziono żadnych wierszy na liście.")
+                return
+
+            self.set_status("Zapisuję plik Excel...")
+            self.log("[INFO] Zapisuję plik Excel...")
+            self.set_progress(90, 100)
+            path = self.save_excel(rows)
+            self.file_var.set(os.path.basename(path))
+            self.set_progress(100, 100)
+            self.set_busy(False, "Gotowe")
+            self.log(f"[OK] Zapisano: {path}")
+            messagebox.showinfo("Sukces", f"Zestawienie zapisane.\n\n{path}")
+        except Exception as e:
+            self.set_busy(False, "Błąd")
+            self.log(f"[BŁĄD] {e}")
+            messagebox.showerror("Błąd", f"Wystąpił błąd.\n\n{e}")
+
+    def on_close(self):
         try:
             if self.context:
                 self.context.close()
@@ -391,612 +831,18 @@ class KsefSimpleSummaryApp:
                 self.playwright.stop()
         except Exception:
             pass
-
-        self.context = None
-        self.browser = None
-        self.page = None
-        self.playwright = None
-
-    def parse_date(self, value: str) -> str:
-        value = value.strip()
-        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d"):
-            try:
-                return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-        raise ValueError(f"Niepoprawna data: {value}")
-
-    def normalize_spaces(self, text: str) -> str:
-        return re.sub(r"\s+", " ", (text or "")).strip()
-
-    def normalize_key(self, text: str) -> str:
-        return self.normalize_spaces(text).lower()
-
-    def canonical_header(self, header: str) -> str:
-        key = self.normalize_key(header)
-        for target, aliases in HEADER_ALIASES.items():
-            if key == self.normalize_key(target):
-                return target
-            if key in [self.normalize_key(a) for a in aliases]:
-                return target
-        return header.strip()
-
-    def validate_date_range(self) -> Tuple[str, str]:
-        date_from = self.parse_date(self.date_from_var.get())
-        date_to = self.parse_date(self.date_to_var.get())
-        if date_from > date_to:
-            raise ValueError("Data od nie może być późniejsza niż data do.")
-        return date_from, date_to
-
-    def is_browser_ready(self) -> bool:
-        if self.page is None:
-            return False
-        try:
-            return not self.page.is_closed()
-        except Exception:
-            return False
-
-    def ensure_browser_ready(self):
-        if self.is_browser_ready():
-            return
-        self.close_browser_resources()
-        raise RuntimeError("Przeglądarka KSeF nie jest otwarta. Kliknij 'Otwórz KSeF' i zaloguj się ponownie.")
-
-    def wait_for_table_ready(self, timeout_ms: int = 15000) -> bool:
-        selectors = [
-            "tbody tr",
-            "table tbody tr",
-            "[role='row']",
-            "thead th",
-            "[role='columnheader']",
-        ]
-        for selector in selectors:
-            try:
-                self.page.wait_for_selector(selector, timeout=timeout_ms)
-                return True
-            except Exception:
-                pass
-        return False
-
-    def start_browser(self):
-        try:
-            if self.is_browser_ready():
-                messagebox.showinfo("Informacja", "Przeglądarka jest już otwarta.")
-                return
-
-            self.close_browser_resources()
-
-            self.start_busy("Uruchamianie przeglądarki")
-            self.log("[INFO] Uruchamianie przeglądarki...")
-
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(headless=False, slow_mo=100)
-            self.context = self.browser.new_context(accept_downloads=True)
-            self.page = self.context.new_page()
-            self.page.goto("https://ap.ksef.mf.gov.pl/web/invoice-list", timeout=90000)
-
-            self.stop_busy("Zaloguj się do KSeF")
-            self.log("[OK] KSeF otwarty.")
-            self.log("[INFO] Zaloguj się ręcznie, rozwiń filtry i ustaw daty w KSeF.")
-            self.log("[INFO] Potem przejdź do listy faktur zakupu i kliknij pobierz zestawienie.")
-            messagebox.showinfo(
-                "KSeF",
-                "KSeF został otwarty.\n\nZaloguj się ręcznie, rozwiń filtry, ustaw daty i przejdź do listy faktur zakupu.",
-            )
-        except Exception as e:
-            self.close_browser_resources()
-            self.reset_progress("Błąd")
-            self.log(f"[BŁĄD] Nie udało się otworzyć przeglądarki: {e}")
-            messagebox.showerror("Błąd", f"Nie udało się otworzyć przeglądarki.\n\n{e}")
-
-    def force_fill_first(self, selectors: List[str], value: str) -> bool:
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector)
-                if loc.count() == 0:
-                    continue
-                el = loc.first
-                if not el.is_visible():
-                    continue
-                el.scroll_into_view_if_needed(timeout=3000)
-                try:
-                    el.click(timeout=2000)
-                except Exception:
-                    pass
-                try:
-                    el.fill(value, timeout=3000)
-                except Exception:
-                    try:
-                        el.evaluate(
-                            """
-                            (node, val) => {
-                                node.value = val;
-                                node.dispatchEvent(new Event('input', { bubbles: true }));
-                                node.dispatchEvent(new Event('change', { bubbles: true }));
-                                node.dispatchEvent(new Event('blur', { bubbles: true }));
-                            }
-                            """,
-                            value,
-                        )
-                    except Exception:
-                        continue
-                return True
-            except Exception:
-                pass
-        return False
-
-    def safe_click_first(self, selectors: List[str], timeout: int = 4000, wait_after: int = 1200) -> bool:
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector)
-                if loc.count() > 0 and loc.first.is_visible():
-                    loc.first.click(timeout=timeout)
-                    self.page.wait_for_timeout(wait_after)
-                    return True
-            except Exception:
-                pass
-        return False
-
-    def try_apply_dates(self):
-        date_from, date_to = self.validate_date_range()
-
-        from_selectors = [
-            "input[placeholder*='Od']", "input[placeholder*='od']",
-            "input[aria-label*='Od']", "input[aria-label*='od']",
-            "input[name*='from']", "input[id*='from']",
-        ]
-        to_selectors = [
-            "input[placeholder*='Do']", "input[placeholder*='do']",
-            "input[aria-label*='Do']", "input[aria-label*='do']",
-            "input[name*='to']", "input[id*='to']",
-        ]
-
-        ok_from = self.force_fill_first(from_selectors, date_from)
-        ok_to = self.force_fill_first(to_selectors, date_to)
-        clicked = self.safe_click_first([
-            "button:has-text('Zastosuj')",
-            "button:has-text('Filtruj')",
-            "button:has-text('Szukaj')",
-            "text=Zastosuj",
-            "text=Filtruj",
-        ])
-
-        if ok_from and ok_to:
-            if clicked:
-                self.log(f"[OK] Ustawiono daty {date_from} - {date_to} i odświeżono listę.")
-            else:
-                self.log(f"[OK] Wpisano daty {date_from} - {date_to}. Jeśli lista się nie odświeżyła, kliknij filtr ręcznie.")
-        else:
-            self.log("[INFO] Nie udało się automatycznie znaleźć pól dat. Program pobierze to, co aktualnie widać na liście.")
-
-        self.wait_for_table_ready(timeout_ms=10000)
-
-    def get_table_headers(self) -> List[str]:
-        for selector in ["thead th", "[role='columnheader']"]:
-            try:
-                loc = self.page.locator(selector)
-                headers = []
-                for i in range(loc.count()):
-                    txt = self.normalize_spaces(loc.nth(i).inner_text())
-                    if txt:
-                        headers.append(txt)
-                if headers:
-                    return headers
-            except Exception:
-                pass
-        return []
-
-    def extract_item_key(self, text: str) -> str:
-        text = self.normalize_spaces(text)
-        patterns = [r"(\d{10,}-\d{8}-[A-Z0-9]+-\w+)", r"([A-Z0-9/\-]{6,}/\d{4})"]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1).lower()
-        return text.lower()
-
-    def get_current_page_rows(self) -> List[Dict]:
-        rows_data = []
-        rows = None
-        for selector in ["tbody tr", "table tbody tr", "[role='row']"]:
-            try:
-                loc = self.page.locator(selector)
-                if loc.count() > 0:
-                    rows = loc
-                    break
-            except Exception:
-                pass
-
-        if rows is None:
-            return rows_data
-
-        for i in range(rows.count()):
-            try:
-                row = rows.nth(i)
-                if not row.is_visible():
-                    continue
-                cell_loc = row.locator("td, [role='cell']")
-                cells = []
-                for j in range(cell_loc.count()):
-                    txt = self.normalize_spaces(cell_loc.nth(j).inner_text())
-                    if txt:
-                        cells.append(txt)
-                if len(cells) < 2:
-                    continue
-                rows_data.append({
-                    "cells": cells,
-                    "row_id": self.extract_item_key(" | ".join(cells)),
-                })
-            except Exception:
-                pass
-        return rows_data
-
-    def get_page_signature(self) -> str:
-        rows = self.get_current_page_rows()
-        if not rows:
-            return "EMPTY"
-        return "|".join(row["row_id"] for row in rows[:5])
-
-    def go_to_first_page(self, max_steps: int = 50):
-        selectors = [
-            "button[aria-label*='Poprzednia']",
-            "button[title*='Poprzednia']",
-            "[role='button'][aria-label*='Poprzednia']",
-            "text=Poprzednia",
-            "text=Previous",
-            "button:has-text('<')",
-        ]
-        for _ in range(max_steps):
-            moved = False
-            for selector in selectors:
-                try:
-                    loc = self.page.locator(selector)
-                    if loc.count() == 0:
-                        continue
-                    btn = loc.first
-                    disabled = btn.get_attribute("disabled")
-                    aria_disabled = btn.get_attribute("aria-disabled")
-                    classes = (btn.get_attribute("class") or "").lower()
-                    if disabled is not None or aria_disabled == "true" or "disabled" in classes:
-                        continue
-                    before = self.get_page_signature()
-                    btn.click(timeout=3000)
-                    self.page.wait_for_timeout(1200)
-                    after = self.get_page_signature()
-                    if after != before:
-                        moved = True
-                        break
-                except Exception:
-                    pass
-            if not moved:
-                break
-
-    def go_to_next_page(self) -> bool:
-        selectors = [
-            "button[aria-label*='Następna']",
-            "button[title*='Następna']",
-            "[role='button'][aria-label*='Następna']",
-            "text=Następna",
-            "text=Next",
-            "button:has-text('>')",
-        ]
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector)
-                if loc.count() == 0:
-                    continue
-                btn = loc.first
-                disabled = btn.get_attribute("disabled")
-                aria_disabled = btn.get_attribute("aria-disabled")
-                classes = (btn.get_attribute("class") or "").lower()
-                if disabled is not None or aria_disabled == "true" or "disabled" in classes:
-                    continue
-                before = self.get_page_signature()
-                btn.click(timeout=5000)
-                self.page.wait_for_timeout(1800)
-                after = self.get_page_signature()
-                if after != before:
-                    return True
-            except Exception:
-                pass
-        return False
-
-    def scan_all_pages(self) -> Tuple[List[str], List[Dict], int]:
-        self.go_to_first_page()
-        self.page.wait_for_timeout(1200)
-
-        headers = self.get_table_headers()
-        all_rows: List[Dict] = []
-        seen_pages = set()
-        seen_rows = set()
-        pages = 0
-
-        while True:
-            current_rows = self.get_current_page_rows()
-            signature = self.get_page_signature()
-            if signature in seen_pages:
-                break
-            seen_pages.add(signature)
-            pages += 1
-            self.log(f"[INFO] Odczyt strony {pages}: {len(current_rows)} wierszy")
-
-            for row in current_rows:
-                if row["row_id"] in seen_rows:
-                    continue
-                seen_rows.add(row["row_id"])
-                all_rows.append(row)
-
-            self.update_progress(pages, max(1, pages + 1), "Skanowanie listy")
-            if not self.go_to_next_page():
-                break
-
-        self.go_to_first_page()
-        self.page.wait_for_timeout(1200)
-        return headers, all_rows, pages
-
-    def build_raw_headers(self, headers: List[str], rows: List[Dict]) -> List[str]:
-        if headers and all(len(r["cells"]) == len(headers) for r in rows[: min(20, len(rows))] if r["cells"]):
-            return headers
-        max_len = max((len(r["cells"]) for r in rows), default=0)
-        return [f"Kolumna {i + 1}" for i in range(max_len)]
-
-    def clean_ksef_number(self, value: str) -> str:
-        text = self.normalize_spaces(value)
-        match = re.search(r"(\d{10,}-\d{8}-[A-Z0-9]+-[A-Z0-9]+)", text, re.IGNORECASE)
-        return match.group(1) if match else text
-
-    def clean_invoice_number(self, value: str) -> str:
-        text = self.normalize_spaces(value)
-        text = re.sub(r"\s*Kopiuj numer faktury.*$", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"\s*content_copy.*$", "", text, flags=re.IGNORECASE).strip()
-        return text
-
-    def normalize_export_date(self, value: str) -> str:
-        text = self.normalize_spaces(value)
-        for fmt_in in ("%d.%m.%Y", "%Y-%m-%d", "%d-%m-%Y"):
-            try:
-                return datetime.strptime(text, fmt_in).strftime("%Y-%m-%d")
-            except ValueError:
-                pass
-        return text
-
-    def parse_amount_and_currency(self, value: str) -> Tuple[object, str]:
-        text = self.normalize_spaces(value)
-        match = re.search(r"(-?[0-9\s.,]+)\s*([A-Z]{3})\b", text)
-        if not match:
-            return self.to_number_if_possible(text), ""
-        amount_text = match.group(1).replace(" ", "")
-        if "," in amount_text and "." in amount_text:
-            amount_text = amount_text.replace(".", "").replace(",", ".")
-        elif "," in amount_text:
-            amount_text = amount_text.replace(",", ".")
-        try:
-            amount = float(amount_text)
-            if amount.is_integer():
-                amount = int(amount)
-        except ValueError:
-            amount = self.to_number_if_possible(match.group(1))
-        return amount, match.group(2)
-
-    def map_row_by_position(self, cells: List[str]) -> Dict[str, object]:
-        trimmed = list(cells)
-
-        if trimmed and "zaznacz tylko ten wiersz" in self.normalize_key(trimmed[0]):
-            trimmed = trimmed[1:]
-
-        if len(trimmed) < 10:
-            return {}
-
-        identifier = trimmed[0] if len(trimmed) > 0 else ""
-        seller_name = trimmed[1] if len(trimmed) > 1 else ""
-        nr_ksef = self.clean_ksef_number(trimmed[2]) if len(trimmed) > 2 else ""
-        invoice_no = self.clean_invoice_number(trimmed[3]) if len(trimmed) > 3 else ""
-        issue_date = self.normalize_export_date(trimmed[4]) if len(trimmed) > 4 else ""
-        saved_date = self.normalize_export_date(trimmed[5]) if len(trimmed) > 5 else ""
-        received_date = self.normalize_export_date(trimmed[6]) if len(trimmed) > 6 else ""
-
-        netto, waluta = self.parse_amount_and_currency(trimmed[7]) if len(trimmed) > 7 else ("", "")
-        brutto, waluta_brutto = self.parse_amount_and_currency(trimmed[8]) if len(trimmed) > 8 else ("", "")
-        vat_pln, _ = self.parse_amount_and_currency(trimmed[9]) if len(trimmed) > 9 else ("", "")
-
-        if not waluta:
-            waluta = waluta_brutto
-
-        return {
-            "Identyfikator sprzedawcy": identifier,
-            "Nazwa sprzedawcy": seller_name,
-            "Nr KSeF": nr_ksef,
-            "Nr faktury": invoice_no,
-            "Data wystawienia": issue_date,
-            "Data zapisania w KSeF": saved_date,
-            "Data otrzymania": received_date,
-            "Waluta": waluta,
-            "Netto": netto,
-            "Brutto": brutto,
-            "VAT (PLN)": vat_pln,
-        }
-
-    def map_to_target_rows(self, headers: List[str], rows: List[Dict]) -> List[Dict[str, object]]:
-        raw_headers = self.build_raw_headers(headers, rows)
-        canonical = [self.canonical_header(h) for h in raw_headers]
-        mapped = []
-
-        for row in rows:
-            cells = row["cells"]
-
-            looks_like_current_ksef_grid = (
-                len(cells) >= 10
-                and (
-                    (cells and "zaznacz tylko ten wiersz" in self.normalize_key(cells[0]))
-                    or any("kopiuj numer ksef" in self.normalize_key(c) for c in cells[:5])
-                )
-            )
-
-            if looks_like_current_ksef_grid:
-                normalized = self.map_row_by_position(cells)
-                if normalized:
-                    mapped.append(normalized)
-                    continue
-
-            row_dict = {}
-            for idx, header in enumerate(canonical):
-                row_dict[header] = cells[idx] if idx < len(cells) else ""
-
-            normalized = {col: row_dict.get(col, "") for col in TARGET_COLUMNS}
-
-            if not normalized["Nr KSeF"] and len(cells) >= 10:
-                positional = self.map_row_by_position(cells)
-                if positional:
-                    normalized = positional
-
-            mapped.append(normalized)
-
-        return mapped
-
-    def to_number_if_possible(self, value: str):
-        text = "" if value is None else str(value).strip().replace(" ", "")
-        if not text:
-            return ""
-        if "," in text and "." in text:
-            text = text.replace(".", "").replace(",", ".")
-        elif "," in text:
-            text = text.replace(",", ".")
-        if re.fullmatch(r"-?\d+(\.\d+)?", text):
-            try:
-                return float(text) if "." in text else int(text)
-            except ValueError:
-                return value
-        return value
-
-    def build_summary_rows(self, row_count: int, page_count: int) -> List[Tuple[str, object]]:
-        date_from, date_to = self.validate_date_range()
-        return [
-            ("Data od (opis pliku)", date_from),
-            ("Data do (opis pliku)", date_to),
-            ("Liczba stron", page_count),
-            ("Liczba wierszy", row_count),
-            ("Data eksportu", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        ]
-
-    def style_header_row(self, ws, row_no: int = 1):
-        fill = PatternFill("solid", fgColor="C81F25")
-        font = Font(bold=True, color="FFFFFF")
-        border = Border(
-            left=Side(style="thin", color="D1D5DB"),
-            right=Side(style="thin", color="D1D5DB"),
-            top=Side(style="thin", color="D1D5DB"),
-            bottom=Side(style="thin", color="D1D5DB"),
-        )
-        for cell in ws[row_no]:
-            cell.fill = fill
-            cell.font = font
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    def auto_fit_worksheet(self, ws):
-        for col_cells in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col_cells[0].column)
-            for cell in col_cells:
-                val = "" if cell.value is None else str(cell.value)
-                max_len = max(max_len, len(val))
-            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 34)
-
-    def save_excel(self, headers: List[str], rows: List[Dict]) -> str:
-        if not rows:
-            raise ValueError("Brak danych do zapisania.")
-
-        date_from, date_to = self.validate_date_range()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"KSeF_zestawienie_{date_from}_{date_to}_{timestamp}.xlsx"
-        filepath = os.path.join(self.output_dir, filename)
-
-        wb = Workbook()
-        summary_ws = wb.active
-        summary_ws.title = "Podsumowanie"
-        summary_ws.append(["Parametr", "Wartość"])
-        for row in self.build_summary_rows(len(rows), self.last_pages):
-            summary_ws.append(row)
-        self.style_header_row(summary_ws)
-        self.auto_fit_worksheet(summary_ws)
-        summary_ws.freeze_panes = "A2"
-        summary_ws.auto_filter.ref = summary_ws.dimensions
-
-        ws = wb.create_sheet("Faktury")
-        ws.append(TARGET_COLUMNS)
-
-        for row in self.map_to_target_rows(headers, rows):
-            ws.append([
-                row["Identyfikator sprzedawcy"],
-                row["Nazwa sprzedawcy"],
-                row["Nr KSeF"],
-                row["Nr faktury"],
-                row["Data wystawienia"],
-                row["Data zapisania w KSeF"],
-                row["Data otrzymania"],
-                row["Waluta"],
-                row["Netto"],
-                row["Brutto"],
-                row["VAT (PLN)"],
-            ])
-
-        self.style_header_row(ws)
-        self.auto_fit_worksheet(ws)
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        wb.save(filepath)
-        return filepath
-
-    def run_full_export(self):
-        try:
-            self.ensure_browser_ready()
-            self.validate_date_range()
-
-            self.start_busy("Przygotowanie")
-            self.log("[INFO] Start zestawienia.")
-            self.log("[INFO] Próbuję zastosować zakres dat w KSeF.")
-            self.try_apply_dates()
-            if not self.wait_for_table_ready():
-                raise RuntimeError("Nie udało się znaleźć tabeli z fakturami. Otwórz listę faktur zakupu w KSeF i spróbuj ponownie.")
-            self.log("[INFO] Program pobiera to, co aktualnie widać na liście w KSeF.")
-            self.log("[INFO] Skanuję wszystkie strony listy...")
-            headers, rows, pages = self.scan_all_pages()
-            self.last_headers = headers
-            self.last_rows = rows
-            self.last_pages = pages
-
-            if not rows:
-                self.reset_progress("Brak danych")
-                self.summary_var.set("Nie znaleziono żadnych wierszy")
-                messagebox.showwarning("Brak danych", "Nie znaleziono żadnych wierszy na liście.")
-                return
-
-            self.update_progress(2, 3, "Zapisywanie Excel")
-            filepath = self.save_excel(headers, rows)
-            self.update_progress(3, 3, "Gotowe")
-
-            self.summary_var.set(f"Znaleziono {len(rows)} wierszy na {pages} stronach")
-            self.file_var.set(Path(filepath).name)
-            self.log(f"[OK] Zapisano plik: {filepath}")
-            messagebox.showinfo("Gotowe", f"Zestawienie zapisane.\n\n{filepath}")
-        except Exception as e:
-            self.reset_progress("Błąd")
-            self.log(f"[BŁĄD] {e}")
-            messagebox.showerror("Błąd", str(e))
-
-    def on_close(self):
-        self.close_browser_resources()
         self.root.destroy()
 
 
-if __name__ == "__main__":
-    if sys.platform.startswith("win"):
-        try:
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
+def main():
     root = tk.Tk()
     app = KsefSimpleSummaryApp(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        raise
