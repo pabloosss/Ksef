@@ -7,6 +7,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple
 
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = None
+    ImageTk = None
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
@@ -70,6 +76,7 @@ class KsefSimpleSummaryApp:
         self.last_headers: List[str] = []
         self.last_rows: List[Dict] = []
         self.last_pages: int = 0
+        self.logo_image = None
 
         self.setup_style()
         self.build_ui()
@@ -89,6 +96,50 @@ class KsefSimpleSummaryApp:
             darkcolor="#c81f25",
         )
 
+    def find_logo_file(self) -> str:
+        graphics_dir = Path(self.base_dir) / "Grafiki"
+        if not graphics_dir.exists():
+            return ""
+
+        preferred_names = [
+            "logo.png", "logo.gif", "logo.jpg", "logo.jpeg", "logo.webp",
+            "Logo.png", "Logo.gif", "Logo.jpg", "Logo.jpeg", "Logo.webp",
+        ]
+        for name in preferred_names:
+            candidate = graphics_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+        for ext in ("*.png", "*.gif", "*.jpg", "*.jpeg", "*.webp"):
+            matches = sorted(graphics_dir.glob(ext))
+            if matches:
+                return str(matches[0])
+
+        return ""
+
+    def load_logo(self):
+        logo_path = self.find_logo_file()
+        if not logo_path:
+            return None
+
+        try:
+            suffix = Path(logo_path).suffix.lower()
+            if suffix in {".png", ".gif"}:
+                return tk.PhotoImage(file=logo_path)
+
+            if Image is not None and ImageTk is not None:
+                img = Image.open(logo_path)
+                width, height = img.size
+                target_height = 64
+                if height > 0:
+                    target_width = max(1, int(width * (target_height / height)))
+                    img = img.resize((target_width, target_height))
+                return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+        return None
+
     def build_ui(self):
         outer = tk.Frame(self.root, bg="#f5f7fb", padx=18, pady=18)
         outer.pack(fill="both", expand=True)
@@ -96,25 +147,33 @@ class KsefSimpleSummaryApp:
         header = tk.Frame(outer, bg="#ffffff", bd=1, relief="solid")
         header.pack(fill="x", pady=(0, 12))
 
+        header_inner = tk.Frame(header, bg="#ffffff", padx=18, pady=14)
+        header_inner.pack(fill="x")
+
+        left_header = tk.Frame(header_inner, bg="#ffffff")
+        left_header.pack(side="left", fill="x", expand=True)
+
         tk.Label(
-            header,
+            left_header,
             text="KSeF – Zestawienie faktur do Excel",
             font=("Segoe UI", 20, "bold"),
             bg="#ffffff",
             fg="#111827",
-            padx=18,
-            pady=14,
         ).pack(anchor="w")
 
         tk.Label(
-            header,
-            text="1. Otwórz KSeF  2. Zaloguj się  3. Ustaw daty  4. Kliknij pobierz zestawienie",
+            left_header,
+            text="1. Otwórz KSeF  2. Zaloguj się  3. Rozwiń filtry i ustaw daty ręcznie  4. Kliknij pobierz zestawienie",
             font=("Segoe UI", 10),
             bg="#ffffff",
             fg="#475569",
-            padx=18,
-            pady=(0, 14),
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(8, 0))
+
+        self.logo_image = self.load_logo()
+        if self.logo_image is not None:
+            logo_frame = tk.Frame(header_inner, bg="#ffffff")
+            logo_frame.pack(side="right", anchor="ne")
+            tk.Label(logo_frame, image=self.logo_image, bg="#ffffff").pack(anchor="e")
 
         top = tk.Frame(outer, bg="#f5f7fb")
         top.pack(fill="x", pady=(0, 12))
