@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import math
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
@@ -50,7 +51,7 @@ HEADER_ALIASES = {
 class KsefSimpleSummaryApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("KSeF – Zestawienie FV")
+        self.root.title("KSeF Program do Arkuszy")
         self.root.geometry("980x700")
         self.root.minsize(900, 640)
         self.root.configure(bg="#f5f7fb")
@@ -60,7 +61,7 @@ class KsefSimpleSummaryApp:
         self.context = None
         self.page = None
 
-        self.base_dir = os.getcwd()
+        self.base_dir = str(Path(__file__).resolve().parent)
         self.output_dir = os.path.join(self.base_dir, "zestawienia_ksef")
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -69,7 +70,7 @@ class KsefSimpleSummaryApp:
 
         self.date_from_var = tk.StringVar(value=month_start.strftime("%Y-%m-%d"))
         self.date_to_var = tk.StringVar(value=today.strftime("%Y-%m-%d"))
-        self.status_var = tk.StringVar(value="Gotowe")
+        self.status_var = tk.StringVar(value="Otwórz KSeF")
         self.summary_var = tk.StringVar(value="Brak zapisanych danych")
         self.file_var = tk.StringVar(value="-")
 
@@ -77,23 +78,57 @@ class KsefSimpleSummaryApp:
         self.last_rows: List[Dict] = []
         self.last_pages: int = 0
         self.logo_image = None
+        self.busy_running = False
+        self.dot_phase = 0
+        self.dot_colors_idle = ["#cbd5e1", "#94a3b8", "#64748b", "#94a3b8"]
+        self.dot_colors_ready = ["#22c55e", "#4ade80", "#86efac", "#4ade80"]
+        self.dot_colors_busy = ["#f97316", "#fb923c", "#fdba74", "#fb923c"]
 
         self.setup_style()
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+
     def setup_style(self):
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Main.TButton", font=("Segoe UI", 11, "bold"), padding=10)
-        style.configure("Ghost.TButton", font=("Segoe UI", 10), padding=8)
+
+        style.configure(
+            "Main.TButton",
+            font=("Segoe UI", 11, "bold"),
+            padding=(16, 11),
+            foreground="#ffffff",
+            background="#c81f25",
+            borderwidth=0,
+        )
+        style.map(
+            "Main.TButton",
+            background=[("active", "#a9151b"), ("pressed", "#8f1217")],
+            foreground=[("disabled", "#f3f4f6")],
+        )
+
+        style.configure(
+            "Ghost.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=(14, 10),
+            foreground="#0f172a",
+            background="#ffffff",
+            borderwidth=1,
+            relief="solid",
+        )
+        style.map(
+            "Ghost.TButton",
+            background=[("active", "#eef2f7"), ("pressed", "#e2e8f0")],
+        )
+
         style.configure(
             "Red.Horizontal.TProgressbar",
-            troughcolor="#e5e7eb",
+            troughcolor="#e2e8f0",
             background="#c81f25",
-            bordercolor="#e5e7eb",
+            bordercolor="#e2e8f0",
             lightcolor="#c81f25",
             darkcolor="#c81f25",
+            thickness=10,
         )
 
     def find_logo_file(self) -> str:
@@ -117,118 +152,163 @@ class KsefSimpleSummaryApp:
 
         return ""
 
+
     def load_logo(self):
         logo_path = self.find_logo_file()
         if not logo_path:
             return None
 
-        try:
-            suffix = Path(logo_path).suffix.lower()
-            if suffix in {".png", ".gif"}:
-                return tk.PhotoImage(file=logo_path)
+        max_w, max_h = 280, 78
 
+        try:
             if Image is not None and ImageTk is not None:
                 img = Image.open(logo_path)
-                width, height = img.size
-                target_height = 64
-                if height > 0:
-                    target_width = max(1, int(width * (target_height / height)))
-                    img = img.resize((target_width, target_height))
+                img.thumbnail((max_w, max_h))
                 return ImageTk.PhotoImage(img)
+
+            suffix = Path(logo_path).suffix.lower()
+            if suffix in {".png", ".gif"}:
+                img = tk.PhotoImage(file=logo_path)
+                width = max(1, img.width())
+                height = max(1, img.height())
+                scale_w = math.ceil(width / max_w)
+                scale_h = math.ceil(height / max_h)
+                scale = max(1, scale_w, scale_h)
+                if scale > 1:
+                    img = img.subsample(scale, scale)
+                return img
         except Exception:
             return None
 
         return None
 
+
     def build_ui(self):
-        outer = tk.Frame(self.root, bg="#f5f7fb", padx=18, pady=18)
+        outer = tk.Frame(self.root, bg="#eef2f7", padx=18, pady=18)
         outer.pack(fill="both", expand=True)
 
-        header = tk.Frame(outer, bg="#ffffff", bd=1, relief="solid")
-        header.pack(fill="x", pady=(0, 12))
+        header = tk.Frame(outer, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1)
+        header.pack(fill="x", pady=(0, 14))
 
-        header_inner = tk.Frame(header, bg="#ffffff", padx=18, pady=14)
+        accent = tk.Frame(header, bg="#c81f25", height=5)
+        accent.pack(fill="x", side="top")
+
+        header_inner = tk.Frame(header, bg="#ffffff", padx=22, pady=18)
         header_inner.pack(fill="x")
 
         left_header = tk.Frame(header_inner, bg="#ffffff")
-        left_header.pack(side="left", fill="x", expand=True)
+        left_header.pack(side="left", fill="both", expand=True)
 
         tk.Label(
             left_header,
-            text="KSeF – Zestawienie faktur do Excel",
-            font=("Segoe UI", 20, "bold"),
+            text="KSeF Program do Arkuszy",
+            font=("Segoe UI", 22, "bold"),
             bg="#ffffff",
-            fg="#111827",
+            fg="#0f172a",
         ).pack(anchor="w")
 
         tk.Label(
             left_header,
-            text="1. Otwórz KSeF  2. Zaloguj się  3. Rozwiń filtry i ustaw daty ręcznie  4. Kliknij pobierz zestawienie",
+            text="by Paweł Ruchlicki",
             font=("Segoe UI", 10),
             bg="#ffffff",
-            fg="#475569",
-        ).pack(anchor="w", pady=(8, 0))
+            fg="#64748b",
+        ).pack(anchor="w", pady=(6, 0))
 
         self.logo_image = self.load_logo()
         if self.logo_image is not None:
-            logo_frame = tk.Frame(header_inner, bg="#ffffff")
-            logo_frame.pack(side="right", anchor="ne")
-            tk.Label(logo_frame, image=self.logo_image, bg="#ffffff").pack(anchor="e")
+            logo_wrap = tk.Frame(header_inner, bg="#ffffff")
+            logo_wrap.pack(side="right", anchor="ne", padx=(18, 0))
 
-        top = tk.Frame(outer, bg="#f5f7fb")
-        top.pack(fill="x", pady=(0, 12))
+            logo_box = tk.Frame(logo_wrap, bg="#ffffff", bd=0, highlightbackground="#e2e8f0", highlightthickness=1, padx=14, pady=10)
+            logo_box.pack(anchor="e")
 
-        form = tk.Frame(top, bg="#ffffff", bd=1, relief="solid", padx=16, pady=16)
-        form.pack(fill="x")
+            tk.Label(logo_box, image=self.logo_image, bg="#ffffff").pack(anchor="e")
 
-        tk.Label(form, text="Data od", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=0, sticky="w")
-        tk.Entry(form, textvariable=self.date_from_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16).grid(row=1, column=0, sticky="w", padx=(0, 12), ipady=4)
+        controls = tk.Frame(outer, bg="#eef2f7")
+        controls.pack(fill="x", pady=(0, 14))
 
-        tk.Label(form, text="Data do", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=1, sticky="w")
-        tk.Entry(form, textvariable=self.date_to_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16).grid(row=1, column=1, sticky="w", padx=(0, 16), ipady=4)
+        left_panel = tk.Frame(controls, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=18, pady=16)
+        left_panel.pack(side="left", fill="x", expand=True)
 
-        ttk.Button(form, text="Otwórz KSeF", style="Ghost.TButton", command=self.start_browser).grid(row=0, column=2, rowspan=2, sticky="ew", padx=(0, 8))
-        ttk.Button(form, text="Pobierz zestawienie", style="Main.TButton", command=self.run_full_export).grid(row=0, column=3, rowspan=2, sticky="ew")
-        ttk.Button(form, text="Otwórz folder", style="Ghost.TButton", command=self.open_output_folder).grid(row=0, column=4, rowspan=2, sticky="ew", padx=(8, 0))
+        tk.Label(left_panel, text="Zakres do nazwy pliku", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        form.grid_columnconfigure(5, weight=1)
+        tk.Label(left_panel, text="Data od", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#0f172a").grid(row=1, column=0, sticky="w")
+        date_from_entry = tk.Entry(left_panel, textvariable=self.date_from_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16)
+        date_from_entry.grid(row=2, column=0, sticky="w", padx=(0, 14), ipady=6, pady=(4, 0))
 
-        info = tk.Frame(outer, bg="#ffffff", bd=1, relief="solid", padx=16, pady=14)
-        info.pack(fill="x", pady=(0, 12))
+        tk.Label(left_panel, text="Data do", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#0f172a").grid(row=1, column=1, sticky="w")
+        date_to_entry = tk.Entry(left_panel, textvariable=self.date_to_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16)
+        date_to_entry.grid(row=2, column=1, sticky="w", ipady=6, pady=(4, 0))
 
-        tk.Label(info, text="Status", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=0, sticky="w")
-        tk.Label(info, textvariable=self.status_var, font=("Segoe UI", 11), bg="#ffffff", fg="#334155").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        buttons_panel = tk.Frame(controls, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=18, pady=16)
+        buttons_panel.pack(side="left", padx=(12, 0))
 
-        tk.Label(info, text="Wynik", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=1, sticky="w", padx=(32, 0))
-        tk.Label(info, textvariable=self.summary_var, font=("Segoe UI", 11), bg="#ffffff", fg="#334155").grid(row=1, column=1, sticky="w", padx=(32, 0), pady=(4, 0))
+        ttk.Button(buttons_panel, text="Otwórz KSeF", style="Ghost.TButton", command=self.start_browser).pack(fill="x")
+        ttk.Button(buttons_panel, text="Pobierz zestawienie", style="Main.TButton", command=self.run_full_export).pack(fill="x", pady=10)
+        ttk.Button(buttons_panel, text="Otwórz folder", style="Ghost.TButton", command=self.open_output_folder).pack(fill="x")
 
-        tk.Label(info, text="Plik", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=2, sticky="w", padx=(32, 0))
-        tk.Label(info, textvariable=self.file_var, font=("Segoe UI", 11), bg="#ffffff", fg="#334155").grid(row=1, column=2, sticky="w", padx=(32, 0), pady=(4, 0))
+        status_row = tk.Frame(outer, bg="#eef2f7")
+        status_row.pack(fill="x", pady=(0, 14))
 
-        self.progress = ttk.Progressbar(outer, mode="determinate", maximum=100, style="Red.Horizontal.TProgressbar")
-        self.progress.pack(fill="x", pady=(0, 12))
+        self.status_card = tk.Frame(status_row, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=16, pady=14)
+        self.status_card.pack(side="left", fill="x", expand=True)
 
-        log_card = tk.Frame(outer, bg="#ffffff", bd=1, relief="solid")
+        self.result_card = tk.Frame(status_row, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=16, pady=14)
+        self.result_card.pack(side="left", fill="x", expand=True, padx=12)
+
+        self.file_card = tk.Frame(status_row, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1, padx=16, pady=14)
+        self.file_card.pack(side="left", fill="x", expand=True)
+
+        tk.Label(self.status_card, text="Status", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").pack(anchor="w")
+        status_line = tk.Frame(self.status_card, bg="#ffffff")
+        status_line.pack(anchor="w", fill="x", pady=(10, 0))
+
+        self.status_dot_canvas = tk.Canvas(status_line, width=14, height=14, bg="#ffffff", highlightthickness=0, bd=0)
+        self.status_dot_canvas.pack(side="left")
+        self.status_dot_item = self.status_dot_canvas.create_oval(2, 2, 12, 12, fill="#94a3b8", outline="")
+
+        self.status_label = tk.Label(status_line, textvariable=self.status_var, font=("Segoe UI", 12, "bold"), bg="#ffffff", fg="#0f172a")
+        self.status_label.pack(side="left", padx=(8, 0))
+
+        tk.Label(self.result_card, text="Wynik", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").pack(anchor="w")
+        tk.Label(self.result_card, textvariable=self.summary_var, font=("Segoe UI", 12), bg="#ffffff", fg="#0f172a", wraplength=250, justify="left").pack(anchor="w", pady=(10, 0))
+
+        tk.Label(self.file_card, text="Plik", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#334155").pack(anchor="w")
+        tk.Label(self.file_card, textvariable=self.file_var, font=("Segoe UI", 12), bg="#ffffff", fg="#0f172a", wraplength=250, justify="left").pack(anchor="w", pady=(10, 0))
+
+        progress_wrap = tk.Frame(outer, bg="#eef2f7")
+        progress_wrap.pack(fill="x", pady=(0, 14))
+
+        self.progress = ttk.Progressbar(progress_wrap, mode="determinate", maximum=100, style="Red.Horizontal.TProgressbar")
+        self.progress.pack(fill="x")
+
+        log_card = tk.Frame(outer, bg="#ffffff", bd=0, highlightbackground="#d8dee8", highlightthickness=1)
         log_card.pack(fill="both", expand=True)
 
-        tk.Label(log_card, text="Log", font=("Segoe UI", 14, "bold"), bg="#ffffff", fg="#111827", padx=16, pady=12).pack(anchor="w")
+        log_header = tk.Frame(log_card, bg="#ffffff")
+        log_header.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Label(log_header, text="Log", font=("Segoe UI", 14, "bold"), bg="#ffffff", fg="#0f172a").pack(side="left")
 
         self.log_box = tk.Text(
             log_card,
             font=("Consolas", 10),
-            bg="#0f172a",
+            bg="#081229",
             fg="#e2e8f0",
             insertbackground="#ffffff",
             wrap="word",
             bd=0,
             relief="flat",
-            padx=12,
-            pady=12,
+            padx=14,
+            pady=14,
             height=18,
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
         self.log("[INFO] Aplikacja uruchomiona.")
-        self.log("[INFO] To jest uproszczona wersja tylko pod zestawienie do Excel.")
+        self.log("[INFO] Ustaw filtry ręcznie w KSeF, a potem kliknij pobierz zestawienie.")
+        self.animate_status_dot()
 
     def log(self, text: str):
         self.log_box.configure(state="normal")
@@ -244,15 +324,49 @@ class KsefSimpleSummaryApp:
     def update_progress(self, current: int, total: int, text: str):
         total = max(1, total)
         current = max(0, min(current, total))
-        self.progress.configure(maximum=total)
+        self.busy_running = False
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=total)
         self.progress["value"] = current
         percent = int(current / total * 100)
         self.set_status(f"{text} ({percent}%)")
 
     def reset_progress(self, text: str):
-        self.progress.configure(maximum=100)
+        self.busy_running = False
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100)
         self.progress["value"] = 0
         self.set_status(text)
+
+
+    def start_busy(self, text: str):
+        self.busy_running = True
+        self.progress.stop()
+        self.progress.configure(mode="indeterminate")
+        self.progress.start(12)
+        self.set_status(text)
+
+    def stop_busy(self, text: str, progress_value: int = 0):
+        self.busy_running = False
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100)
+        self.progress["value"] = progress_value
+        self.set_status(text)
+
+    def animate_status_dot(self):
+        if hasattr(self, "status_dot_canvas"):
+            if self.busy_running:
+                palette = self.dot_colors_busy
+            elif self.page is not None:
+                palette = self.dot_colors_ready
+            else:
+                palette = self.dot_colors_idle
+
+            color = palette[self.dot_phase % len(palette)]
+            self.status_dot_canvas.itemconfigure(self.status_dot_item, fill=color)
+            self.dot_phase += 1
+
+        self.root.after(180, self.animate_status_dot)
 
     def open_output_folder(self):
         try:
@@ -260,6 +374,28 @@ class KsefSimpleSummaryApp:
             os.startfile(self.output_dir)
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie udało się otworzyć folderu.\n\n{e}")
+
+    def close_browser_resources(self):
+        try:
+            if self.context:
+                self.context.close()
+        except Exception:
+            pass
+        try:
+            if self.browser:
+                self.browser.close()
+        except Exception:
+            pass
+        try:
+            if self.playwright:
+                self.playwright.stop()
+        except Exception:
+            pass
+
+        self.context = None
+        self.browser = None
+        self.page = None
+        self.playwright = None
 
     def parse_date(self, value: str) -> str:
         value = value.strip()
@@ -285,13 +421,52 @@ class KsefSimpleSummaryApp:
                 return target
         return header.strip()
 
+    def validate_date_range(self) -> Tuple[str, str]:
+        date_from = self.parse_date(self.date_from_var.get())
+        date_to = self.parse_date(self.date_to_var.get())
+        if date_from > date_to:
+            raise ValueError("Data od nie może być późniejsza niż data do.")
+        return date_from, date_to
+
+    def is_browser_ready(self) -> bool:
+        if self.page is None:
+            return False
+        try:
+            return not self.page.is_closed()
+        except Exception:
+            return False
+
+    def ensure_browser_ready(self):
+        if self.is_browser_ready():
+            return
+        self.close_browser_resources()
+        raise RuntimeError("Przeglądarka KSeF nie jest otwarta. Kliknij 'Otwórz KSeF' i zaloguj się ponownie.")
+
+    def wait_for_table_ready(self, timeout_ms: int = 15000) -> bool:
+        selectors = [
+            "tbody tr",
+            "table tbody tr",
+            "[role='row']",
+            "thead th",
+            "[role='columnheader']",
+        ]
+        for selector in selectors:
+            try:
+                self.page.wait_for_selector(selector, timeout=timeout_ms)
+                return True
+            except Exception:
+                pass
+        return False
+
     def start_browser(self):
         try:
-            if self.page is not None:
+            if self.is_browser_ready():
                 messagebox.showinfo("Informacja", "Przeglądarka jest już otwarta.")
                 return
 
-            self.reset_progress("Uruchamianie przeglądarki")
+            self.close_browser_resources()
+
+            self.start_busy("Uruchamianie przeglądarki")
             self.log("[INFO] Uruchamianie przeglądarki...")
 
             self.playwright = sync_playwright().start()
@@ -300,14 +475,16 @@ class KsefSimpleSummaryApp:
             self.page = self.context.new_page()
             self.page.goto("https://ap.ksef.mf.gov.pl/web/invoice-list", timeout=90000)
 
-            self.reset_progress("Zaloguj się do KSeF")
+            self.stop_busy("Zaloguj się do KSeF")
             self.log("[OK] KSeF otwarty.")
-            self.log("[INFO] Zaloguj się ręcznie i przejdź do listy faktur zakupu.")
+            self.log("[INFO] Zaloguj się ręcznie, rozwiń filtry i ustaw daty w KSeF.")
+            self.log("[INFO] Potem przejdź do listy faktur zakupu i kliknij pobierz zestawienie.")
             messagebox.showinfo(
                 "KSeF",
-                "KSeF został otwarty.\n\nZaloguj się ręcznie i przejdź do listy faktur zakupu.",
+                "KSeF został otwarty.\n\nZaloguj się ręcznie, rozwiń filtry, ustaw daty i przejdź do listy faktur zakupu.",
             )
         except Exception as e:
+            self.close_browser_resources()
             self.reset_progress("Błąd")
             self.log(f"[BŁĄD] Nie udało się otworzyć przeglądarki: {e}")
             messagebox.showerror("Błąd", f"Nie udało się otworzyć przeglądarki.\n\n{e}")
@@ -361,8 +538,7 @@ class KsefSimpleSummaryApp:
         return False
 
     def try_apply_dates(self):
-        date_from = self.parse_date(self.date_from_var.get())
-        date_to = self.parse_date(self.date_to_var.get())
+        date_from, date_to = self.validate_date_range()
 
         from_selectors = [
             "input[placeholder*='Od']", "input[placeholder*='od']",
@@ -392,6 +568,8 @@ class KsefSimpleSummaryApp:
                 self.log(f"[OK] Wpisano daty {date_from} - {date_to}. Jeśli lista się nie odświeżyła, kliknij filtr ręcznie.")
         else:
             self.log("[INFO] Nie udało się automatycznie znaleźć pól dat. Program pobierze to, co aktualnie widać na liście.")
+
+        self.wait_for_table_ready(timeout_ms=10000)
 
     def get_table_headers(self) -> List[str]:
         for selector in ["thead th", "[role='columnheader']"]:
@@ -584,10 +762,14 @@ class KsefSimpleSummaryApp:
 
     def parse_amount_and_currency(self, value: str) -> Tuple[object, str]:
         text = self.normalize_spaces(value)
-        match = re.search(r"([0-9\s.,]+)\s*([A-Z]{3})\b", text)
+        match = re.search(r"(-?[0-9\s.,]+)\s*([A-Z]{3})\b", text)
         if not match:
             return self.to_number_if_possible(text), ""
-        amount_text = match.group(1).replace(" ", "").replace(".", "").replace(",", ".")
+        amount_text = match.group(1).replace(" ", "")
+        if "," in amount_text and "." in amount_text:
+            amount_text = amount_text.replace(".", "").replace(",", ".")
+        elif "," in amount_text:
+            amount_text = amount_text.replace(",", ".")
         try:
             amount = float(amount_text)
             if amount.is_integer():
@@ -675,13 +857,26 @@ class KsefSimpleSummaryApp:
         text = "" if value is None else str(value).strip().replace(" ", "")
         if not text:
             return ""
-        text = text.replace(",", ".")
+        if "," in text and "." in text:
+            text = text.replace(".", "").replace(",", ".")
+        elif "," in text:
+            text = text.replace(",", ".")
         if re.fullmatch(r"-?\d+(\.\d+)?", text):
             try:
                 return float(text) if "." in text else int(text)
             except ValueError:
                 return value
         return value
+
+    def build_summary_rows(self, row_count: int, page_count: int) -> List[Tuple[str, object]]:
+        date_from, date_to = self.validate_date_range()
+        return [
+            ("Data od (opis pliku)", date_from),
+            ("Data do (opis pliku)", date_to),
+            ("Liczba stron", page_count),
+            ("Liczba wierszy", row_count),
+            ("Data eksportu", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ]
 
     def style_header_row(self, ws, row_no: int = 1):
         fill = PatternFill("solid", fgColor="C81F25")
@@ -711,15 +906,23 @@ class KsefSimpleSummaryApp:
         if not rows:
             raise ValueError("Brak danych do zapisania.")
 
-        date_from = self.parse_date(self.date_from_var.get())
-        date_to = self.parse_date(self.date_to_var.get())
+        date_from, date_to = self.validate_date_range()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"KSeF_zestawienie_{date_from}_{date_to}_{timestamp}.xlsx"
         filepath = os.path.join(self.output_dir, filename)
 
         wb = Workbook()
-        ws = wb.active
-        ws.title = "Invoices"
+        summary_ws = wb.active
+        summary_ws.title = "Podsumowanie"
+        summary_ws.append(["Parametr", "Wartość"])
+        for row in self.build_summary_rows(len(rows), self.last_pages):
+            summary_ws.append(row)
+        self.style_header_row(summary_ws)
+        self.auto_fit_worksheet(summary_ws)
+        summary_ws.freeze_panes = "A2"
+        summary_ws.auto_filter.ref = summary_ws.dimensions
+
+        ws = wb.create_sheet("Faktury")
         ws.append(TARGET_COLUMNS)
 
         for row in self.map_to_target_rows(headers, rows):
@@ -740,23 +943,22 @@ class KsefSimpleSummaryApp:
         self.style_header_row(ws)
         self.auto_fit_worksheet(ws)
         ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
         wb.save(filepath)
         return filepath
 
     def run_full_export(self):
         try:
-            if self.page is None:
-                messagebox.showwarning("Uwaga", "Najpierw kliknij 'Otwórz KSeF'.")
-                return
+            self.ensure_browser_ready()
+            self.validate_date_range()
 
-            self.parse_date(self.date_from_var.get())
-            self.parse_date(self.date_to_var.get())
-
-            self.reset_progress("Przygotowanie")
+            self.start_busy("Przygotowanie")
             self.log("[INFO] Start zestawienia.")
-            self.log("[INFO] Próba ustawienia dat w KSeF...")
+            self.log("[INFO] Próbuję zastosować zakres dat w KSeF.")
             self.try_apply_dates()
-
+            if not self.wait_for_table_ready():
+                raise RuntimeError("Nie udało się znaleźć tabeli z fakturami. Otwórz listę faktur zakupu w KSeF i spróbuj ponownie.")
+            self.log("[INFO] Program pobiera to, co aktualnie widać na liście w KSeF.")
             self.log("[INFO] Skanuję wszystkie strony listy...")
             headers, rows, pages = self.scan_all_pages()
             self.last_headers = headers
@@ -783,21 +985,7 @@ class KsefSimpleSummaryApp:
             messagebox.showerror("Błąd", str(e))
 
     def on_close(self):
-        try:
-            if self.context:
-                self.context.close()
-        except Exception:
-            pass
-        try:
-            if self.browser:
-                self.browser.close()
-        except Exception:
-            pass
-        try:
-            if self.playwright:
-                self.playwright.stop()
-        except Exception:
-            pass
+        self.close_browser_resources()
         self.root.destroy()
 
 
