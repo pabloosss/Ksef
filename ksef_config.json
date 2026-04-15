@@ -1,0 +1,35 @@
+{
+  "table_selectors": [
+    "table",
+    "[role='grid']",
+    "[role='table']",
+    ".ag-root-wrapper",
+    ".p-datatable"
+  ],
+  "next_button_xpaths": [
+    "//button[contains(., 'Następna') and not(@disabled)]",
+    "//button[contains(., 'Dalej') and not(@disabled)]",
+    "//button[@aria-label='Next page' and not(@disabled)]",
+    "//a[contains(., 'Następna') and not(contains(@class, 'disabled'))]",
+    "//button[contains(., '>') and not(@disabled)]"
+  ],
+  "date_input_hints": {
+    "from": [
+      "data od",
+      "od",
+      "data otrzymania od",
+      "zakres od",
+      "date from"
+    ],
+    "to": [
+      "data do",
+      "do",
+      "data otrzymania do",
+      "zakres do",
+      "date to"
+    ]
+  },
+  "prefer_date_type": "data_otrzymania",
+  "max_pages": 500,
+  "wait_timeout": 20
+}
