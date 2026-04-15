@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import zipfile
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
@@ -46,7 +47,7 @@ class KsefSimpleSummaryApp:
         self.root = root
         self.root.title("KSeF – Zestawienie FV")
         self.root.geometry("980x700")
-        self.root.minsize(900, 640)
+        self.root.minsize(920, 660)
         self.root.configure(bg="#f5f7fb")
 
         self.playwright = None
@@ -108,7 +109,7 @@ class KsefSimpleSummaryApp:
 
         tk.Label(
             header,
-            text="1. Otwórz KSeF  2. Zaloguj się  3. Ustaw daty  4. Kliknij pobierz zestawienie",
+            text="1. Otwórz KSeF  2. Zaloguj się  3. Kliknij \"Rozwiń filtry\" i ustaw daty ręcznie  4. Kliknij pobierz zestawienie",
             font=("Segoe UI", 10),
             bg="#ffffff",
             fg="#475569",
@@ -122,11 +123,11 @@ class KsefSimpleSummaryApp:
         form = tk.Frame(top, bg="#ffffff", bd=1, relief="solid", padx=16, pady=16)
         form.pack(fill="x")
 
-        tk.Label(form, text="Data od", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=0, sticky="w")
-        tk.Entry(form, textvariable=self.date_from_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16).grid(row=1, column=0, sticky="w", padx=(0, 12), ipady=4)
+        tk.Label(form, text="Data od (do nazwy pliku)", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=0, sticky="w")
+        tk.Entry(form, textvariable=self.date_from_var, font=("Segoe UI", 12), relief="solid", bd=1, width=18).grid(row=1, column=0, sticky="w", padx=(0, 12), ipady=4)
 
-        tk.Label(form, text="Data do", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=1, sticky="w")
-        tk.Entry(form, textvariable=self.date_to_var, font=("Segoe UI", 12), relief="solid", bd=1, width=16).grid(row=1, column=1, sticky="w", padx=(0, 16), ipady=4)
+        tk.Label(form, text="Data do (do nazwy pliku)", font=("Segoe UI", 10, "bold"), bg="#ffffff", fg="#111827").grid(row=0, column=1, sticky="w")
+        tk.Entry(form, textvariable=self.date_to_var, font=("Segoe UI", 12), relief="solid", bd=1, width=18).grid(row=1, column=1, sticky="w", padx=(0, 16), ipady=4)
 
         ttk.Button(form, text="Otwórz KSeF", style="Ghost.TButton", command=self.start_browser).grid(row=0, column=2, rowspan=2, sticky="ew", padx=(0, 8))
         ttk.Button(form, text="Pobierz zestawienie", style="Main.TButton", command=self.run_full_export).grid(row=0, column=3, rowspan=2, sticky="ew")
@@ -169,18 +170,25 @@ class KsefSimpleSummaryApp:
         )
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self.log("[INFO] Aplikacja uruchomiona.")
-        self.log("[INFO] To jest uproszczona wersja tylko pod zestawienie do Excel.")
+        self.log("[INFO] Daty ustawiasz ręcznie w KSeF. Program tylko czyta aktualną listę i robi Excel.")
+
+    def pump_ui(self):
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            pass
 
     def log(self, text: str):
         self.log_box.configure(state="normal")
         self.log_box.insert("end", text + "\n")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
-        self.root.update_idletasks()
+        self.pump_ui()
 
     def set_status(self, text: str):
         self.status_var.set(text)
-        self.root.update_idletasks()
+        self.pump_ui()
 
     def update_progress(self, current: int, total: int, text: str):
         total = max(1, total)
@@ -236,103 +244,27 @@ class KsefSimpleSummaryApp:
             self.log("[INFO] Uruchamianie przeglądarki...")
 
             self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(headless=False, slow_mo=100)
+            self.browser = self.playwright.chromium.launch(headless=False, slow_mo=80)
             self.context = self.browser.new_context(accept_downloads=True)
             self.page = self.context.new_page()
             self.page.goto("https://ap.ksef.mf.gov.pl/web/invoice-list", timeout=90000)
 
             self.reset_progress("Zaloguj się do KSeF")
             self.log("[OK] KSeF otwarty.")
-            self.log("[INFO] Zaloguj się ręcznie i przejdź do listy faktur zakupu.")
+            self.log("[INFO] Zaloguj się ręcznie, kliknij 'Rozwiń filtry', ustaw daty i pokaż listę faktur zakupu.")
             messagebox.showinfo(
                 "KSeF",
-                "KSeF został otwarty.\n\nZaloguj się ręcznie i przejdź do listy faktur zakupu.",
+                "KSeF został otwarty.\n\n"
+                "1. Zaloguj się ręcznie\n"
+                "2. Kliknij 'Rozwiń filtry'\n"
+                "3. Ustaw daty ręcznie\n"
+                "4. Pokaż listę faktur zakupu\n"
+                "5. Kliknij 'Pobierz zestawienie' w programie",
             )
         except Exception as e:
             self.reset_progress("Błąd")
             self.log(f"[BŁĄD] Nie udało się otworzyć przeglądarki: {e}")
             messagebox.showerror("Błąd", f"Nie udało się otworzyć przeglądarki.\n\n{e}")
-
-    def force_fill_first(self, selectors: List[str], value: str) -> bool:
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector)
-                if loc.count() == 0:
-                    continue
-                el = loc.first
-                if not el.is_visible():
-                    continue
-                el.scroll_into_view_if_needed(timeout=3000)
-                try:
-                    el.click(timeout=2000)
-                except Exception:
-                    pass
-                try:
-                    el.fill(value, timeout=3000)
-                except Exception:
-                    try:
-                        el.evaluate(
-                            """
-                            (node, val) => {
-                                node.value = val;
-                                node.dispatchEvent(new Event('input', { bubbles: true }));
-                                node.dispatchEvent(new Event('change', { bubbles: true }));
-                                node.dispatchEvent(new Event('blur', { bubbles: true }));
-                            }
-                            """,
-                            value,
-                        )
-                    except Exception:
-                        continue
-                return True
-            except Exception:
-                pass
-        return False
-
-    def safe_click_first(self, selectors: List[str], timeout: int = 4000, wait_after: int = 1200) -> bool:
-        for selector in selectors:
-            try:
-                loc = self.page.locator(selector)
-                if loc.count() > 0 and loc.first.is_visible():
-                    loc.first.click(timeout=timeout)
-                    self.page.wait_for_timeout(wait_after)
-                    return True
-            except Exception:
-                pass
-        return False
-
-    def try_apply_dates(self):
-        date_from = self.parse_date(self.date_from_var.get())
-        date_to = self.parse_date(self.date_to_var.get())
-
-        from_selectors = [
-            "input[placeholder*='Od']", "input[placeholder*='od']",
-            "input[aria-label*='Od']", "input[aria-label*='od']",
-            "input[name*='from']", "input[id*='from']",
-        ]
-        to_selectors = [
-            "input[placeholder*='Do']", "input[placeholder*='do']",
-            "input[aria-label*='Do']", "input[aria-label*='do']",
-            "input[name*='to']", "input[id*='to']",
-        ]
-
-        ok_from = self.force_fill_first(from_selectors, date_from)
-        ok_to = self.force_fill_first(to_selectors, date_to)
-        clicked = self.safe_click_first([
-            "button:has-text('Zastosuj')",
-            "button:has-text('Filtruj')",
-            "button:has-text('Szukaj')",
-            "text=Zastosuj",
-            "text=Filtruj",
-        ])
-
-        if ok_from and ok_to:
-            if clicked:
-                self.log(f"[OK] Ustawiono daty {date_from} - {date_to} i odświeżono listę.")
-            else:
-                self.log(f"[OK] Wpisano daty {date_from} - {date_to}. Jeśli lista się nie odświeżyła, kliknij filtr ręcznie.")
-        else:
-            self.log("[INFO] Nie udało się automatycznie znaleźć pól dat. Program pobierze to, co aktualnie widać na liście.")
 
     def get_table_headers(self) -> List[str]:
         for selector in ["thead th", "[role='columnheader']"]:
@@ -351,7 +283,11 @@ class KsefSimpleSummaryApp:
 
     def extract_item_key(self, text: str) -> str:
         text = self.normalize_spaces(text)
-        patterns = [r"(\d{10,}-\d{8}-[A-Z0-9]+-\w+)", r"([A-Z0-9/\-]{6,}/\d{4})"]
+        patterns = [
+            r"(\d{10,}-\d{8}-[A-Z0-9]+-[A-Z0-9]+)",
+            r"([A-Z0-9/\-]{6,}/\d{4})",
+            r"([A-Z0-9]{8,})",
+        ]
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -378,27 +314,93 @@ class KsefSimpleSummaryApp:
                 row = rows.nth(i)
                 if not row.is_visible():
                     continue
+
                 cell_loc = row.locator("td, [role='cell']")
                 cells = []
                 for j in range(cell_loc.count()):
                     txt = self.normalize_spaces(cell_loc.nth(j).inner_text())
                     if txt:
                         cells.append(txt)
-                if len(cells) < 2:
+
+                if len(cells) < 4:
                     continue
+
+                row_text = " | ".join(cells)
                 rows_data.append({
                     "cells": cells,
-                    "row_id": self.extract_item_key(" | ".join(cells)),
+                    "row_id": self.extract_item_key(row_text),
+                    "row_text": row_text,
                 })
             except Exception:
                 pass
+
         return rows_data
 
     def get_page_signature(self) -> str:
         rows = self.get_current_page_rows()
         if not rows:
             return "EMPTY"
-        return "|".join(row["row_id"] for row in rows[:5])
+        ids = [row["row_id"] for row in rows[:5]]
+        if len(rows) > 5:
+            ids.extend(row["row_id"] for row in rows[-3:])
+        return "|".join(ids)
+
+    def _wait_for_signature_change(self, before: str, timeout_ms: int = 7000) -> bool:
+        waited = 0
+        while waited < timeout_ms:
+            self.page.wait_for_timeout(250)
+            waited += 250
+            after = self.get_page_signature()
+            if after and after != before:
+                return True
+            self.pump_ui()
+        return False
+
+    def _click_pagination_via_js(self, direction: str) -> bool:
+        script = """
+        (direction) => {
+            const normalize = (v) => (v || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+            };
+            const isDisabled = (el) => {
+                const cls = normalize(el.className || '');
+                return !!el.disabled || el.getAttribute('aria-disabled') === 'true' || cls.includes('disabled');
+            };
+            const words = direction === 'next'
+                ? ['następna', 'następny', 'next', 'dalej', '>', '›', '»']
+                : ['poprzednia', 'poprzedni', 'previous', 'wstecz', '<', '‹', '«'];
+
+            const els = [...document.querySelectorAll('button, a, [role="button"]')];
+            const candidates = [];
+
+            for (const el of els) {
+                if (!isVisible(el) || isDisabled(el)) continue;
+                const text = normalize(el.innerText || el.textContent || '');
+                const aria = normalize(el.getAttribute('aria-label'));
+                const title = normalize(el.getAttribute('title'));
+                const combined = [text, aria, title].join(' | ');
+                if (words.some(w => combined.includes(w))) {
+                    candidates.push(el);
+                }
+            }
+
+            for (const el of candidates) {
+                try {
+                    el.scrollIntoView({block: 'center'});
+                    el.click();
+                    return true;
+                } catch (e) {}
+            }
+            return false;
+        }
+        """
+        try:
+            return bool(self.page.evaluate(script, direction))
+        except Exception:
+            return False
 
     def go_to_first_page(self, max_steps: int = 50):
         selectors = [
@@ -409,8 +411,11 @@ class KsefSimpleSummaryApp:
             "text=Previous",
             "button:has-text('<')",
         ]
+
         for _ in range(max_steps):
             moved = False
+            before = self.get_page_signature()
+
             for selector in selectors:
                 try:
                     loc = self.page.locator(selector)
@@ -422,27 +427,40 @@ class KsefSimpleSummaryApp:
                     classes = (btn.get_attribute("class") or "").lower()
                     if disabled is not None or aria_disabled == "true" or "disabled" in classes:
                         continue
-                    before = self.get_page_signature()
-                    btn.click(timeout=3000)
-                    self.page.wait_for_timeout(1200)
-                    after = self.get_page_signature()
-                    if after != before:
+                    btn.click(timeout=2500)
+                    if self._wait_for_signature_change(before, 4000):
                         moved = True
                         break
                 except Exception:
                     pass
+
+            if not moved:
+                if self._click_pagination_via_js("prev") and self._wait_for_signature_change(before, 4000):
+                    moved = True
+
             if not moved:
                 break
+
+            self.pump_ui()
 
     def go_to_next_page(self) -> bool:
         selectors = [
             "button[aria-label*='Następna']",
             "button[title*='Następna']",
             "[role='button'][aria-label*='Następna']",
+            "button[aria-label*='Dalej']",
+            "button[title*='Dalej']",
+            "[role='button'][aria-label*='Dalej']",
             "text=Następna",
             "text=Next",
+            "text=Dalej",
             "button:has-text('>')",
+            "button:has-text('›')",
+            "button:has-text('»')",
         ]
+
+        before = self.get_page_signature()
+
         for selector in selectors:
             try:
                 loc = self.page.locator(selector)
@@ -454,19 +472,20 @@ class KsefSimpleSummaryApp:
                 classes = (btn.get_attribute("class") or "").lower()
                 if disabled is not None or aria_disabled == "true" or "disabled" in classes:
                     continue
-                before = self.get_page_signature()
-                btn.click(timeout=5000)
-                self.page.wait_for_timeout(1800)
-                after = self.get_page_signature()
-                if after != before:
+                btn.click(timeout=3000)
+                if self._wait_for_signature_change(before, 6000):
                     return True
             except Exception:
                 pass
+
+        if self._click_pagination_via_js("next") and self._wait_for_signature_change(before, 6000):
+            return True
+
         return False
 
     def scan_all_pages(self) -> Tuple[List[str], List[Dict], int]:
         self.go_to_first_page()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(900)
 
         headers = self.get_table_headers()
         all_rows: List[Dict] = []
@@ -475,26 +494,33 @@ class KsefSimpleSummaryApp:
         pages = 0
 
         while True:
+            self.pump_ui()
             current_rows = self.get_current_page_rows()
             signature = self.get_page_signature()
+
             if signature in seen_pages:
+                self.log("[INFO] Wykryto powrót do tej samej strony. Kończę skanowanie.")
                 break
+
             seen_pages.add(signature)
             pages += 1
             self.log(f"[INFO] Odczyt strony {pages}: {len(current_rows)} wierszy")
 
             for row in current_rows:
-                if row["row_id"] in seen_rows:
+                unique_key = row["row_id"] + "||" + row["row_text"]
+                if unique_key in seen_rows:
                     continue
-                seen_rows.add(row["row_id"])
+                seen_rows.add(unique_key)
                 all_rows.append(row)
 
             self.update_progress(pages, max(1, pages + 1), "Skanowanie listy")
+
             if not self.go_to_next_page():
+                self.log("[INFO] Nie znaleziono kolejnej strony. Koniec skanowania.")
                 break
 
         self.go_to_first_page()
-        self.page.wait_for_timeout(1200)
+        self.page.wait_for_timeout(700)
         return headers, all_rows, pages
 
     def build_raw_headers(self, headers: List[str], rows: List[Dict]) -> List[str]:
@@ -568,8 +594,8 @@ class KsefSimpleSummaryApp:
         ws_info = wb.active
         ws_info.title = "Info"
         ws_info.append(["Parametr", "Wartość"])
-        ws_info.append(["Data od", date_from])
-        ws_info.append(["Data do", date_to])
+        ws_info.append(["Data od (opis pliku)", date_from])
+        ws_info.append(["Data do (opis pliku)", date_to])
         ws_info.append(["Data eksportu", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
         ws_info.append(["Liczba wierszy", len(rows)])
         ws_info.append(["Liczba stron", self.last_pages])
@@ -596,16 +622,6 @@ class KsefSimpleSummaryApp:
         self.auto_fit_worksheet(ws_sum)
         ws_sum.freeze_panes = "A2"
 
-        raw_headers = self.build_raw_headers(headers, rows)
-        ws_raw = wb.create_sheet("Surowe dane")
-        ws_raw.append(raw_headers)
-        for row in rows:
-            line = row["cells"] + [""] * (len(raw_headers) - len(row["cells"]))
-            ws_raw.append(line[: len(raw_headers)])
-        self.style_header_row(ws_raw)
-        self.auto_fit_worksheet(ws_raw)
-        ws_raw.freeze_panes = "A2"
-
         wb.save(filepath)
         return filepath
 
@@ -620,10 +636,9 @@ class KsefSimpleSummaryApp:
 
             self.reset_progress("Przygotowanie")
             self.log("[INFO] Start zestawienia.")
-            self.log("[INFO] Próba ustawienia dat w KSeF...")
-            self.try_apply_dates()
-
+            self.log("[INFO] Program NIE ustawia dat. Czytam dokładnie to, co aktualnie masz wyświetlone w KSeF.")
             self.log("[INFO] Skanuję wszystkie strony listy...")
+
             headers, rows, pages = self.scan_all_pages()
             self.last_headers = headers
             self.last_rows = rows
